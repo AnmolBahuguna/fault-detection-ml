@@ -19,6 +19,13 @@ warnings.filterwarnings('ignore')
 
 RANDOM_STATE = 42
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except Exception:
+    pass
+
+
 def _env_bool(name: str, default: bool) -> bool:
     v = os.getenv(name)
     if v is None:
@@ -714,7 +721,8 @@ def main():
         pseudo_mask = (test_ens_cal >= PSEUDO_POS_TH) | (test_ens_cal <= PSEUDO_NEG_TH)
         if pseudo_mask.sum() > 0:
             X_pseudo = X_test.loc[pseudo_mask]
-            y_pseudo = (test_ens_cal[pseudo_mask] >= 0.5).astype(int)
+            y_pseudo = np.where(test_ens_cal[pseudo_mask] >= PSEUDO_POS_TH, 1,
+                         np.where(test_ens_cal[pseudo_mask] <= PSEUDO_NEG_TH, 0, np.nan)).astype(int)
             X_aug = pd.concat([X, X_pseudo], axis=0, ignore_index=True)
             y_aug = pd.concat([y, pd.Series(y_pseudo)], axis=0, ignore_index=True)
             oof_base, test_base, stability = oof_multi_seed(X_aug, y_aug, X_test, SEEDS, N_SPLITS)
