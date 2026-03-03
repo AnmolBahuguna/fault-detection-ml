@@ -251,10 +251,132 @@ def get_tabnet(seed: int):
         return None
 
 
-def fit_predict_model(model, X_tr, y_tr, X_va, X_te):
+def _fit_xgb_optuna(
+    X_tr: pd.DataFrame,
+    y_tr: pd.Series,
+    X_va: pd.DataFrame,
+    y_va: pd.Series,
+    class_ratio: float,
+    seed: int,
+    fold: int,
+    n_trials: int,
+):
+    try:
+        import optuna
+        from xgboost import XGBClassifier
+    except Exception:
+        return get_xgb(class_ratio, seed)
+
+    def objective(trial: 'optuna.Trial'):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 300, 1200),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'min_child_weight': trial.suggest_float('min_child_weight', 1.0, 10.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.5, 5.0),
+        }
+        model = XGBClassifier(
+            **params,
+            scale_pos_weight=class_ratio,
+            eval_metric='logloss',
+            random_state=seed,
+            n_jobs=-1,
+        )
+        model.fit(X_tr, y_tr)
+        p = model.predict_proba(X_va)[:, 1]
+        _, f1 = tune_threshold(y_va.values, p)
+        return f1
+
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=int(n_trials), show_progress_bar=False)
+
+    best = study.best_params
+    model = XGBClassifier(
+        **best,
+        scale_pos_weight=class_ratio,
+        eval_metric='logloss',
+        random_state=seed,
+        n_jobs=-1,
+    )
+    model.fit(X_tr, y_tr)
+
+    Path('optuna_logs').mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([t.params | {'value': t.value} for t in study.trials]).to_csv(
+        os.path.join('optuna_logs', f'optuna_xgb_seed{seed}_fold{fold}.csv'),
+        index=False,
+    )
+    joblib.dump(study, os.path.join('optuna_logs', f'optuna_xgb_seed{seed}_fold{fold}.pkl'))
+    return model
+
+
+def _fit_lgbm_optuna(
+    X_tr: pd.DataFrame,
+    y_tr: pd.Series,
+    X_va: pd.DataFrame,
+    y_va: pd.Series,
+    seed: int,
+    fold: int,
+    n_trials: int,
+):
+    try:
+        import optuna
+        from lightgbm import LGBMClassifier
+    except Exception:
+        return get_lgbm(seed)
+
+    def objective(trial: 'optuna.Trial'):
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 400, 2000),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 12),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'min_child_samples': trial.suggest_int('min_child_samples', 10, 80),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 5.0),
+        }
+        model = LGBMClassifier(
+            **params,
+            is_unbalance=True,
+            random_state=seed,
+            n_jobs=-1,
+            verbose=-1,
+        )
+        model.fit(X_tr, y_tr)
+        p = model.predict_proba(X_va)[:, 1]
+        _, f1 = tune_threshold(y_va.values, p)
+        return f1
+
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=int(n_trials), show_progress_bar=False)
+
+    best = study.best_params
+    model = LGBMClassifier(
+        **best,
+        is_unbalance=True,
+        random_state=seed,
+        n_jobs=-1,
+        verbose=-1,
+    )
+    model.fit(X_tr, y_tr)
+
+    Path('optuna_logs').mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([t.params | {'value': t.value} for t in study.trials]).to_csv(
+        os.path.join('optuna_logs', f'optuna_lgbm_seed{seed}_fold{fold}.csv'),
+        index=False,
+    )
+    joblib.dump(study, os.path.join('optuna_logs', f'optuna_lgbm_seed{seed}_fold{fold}.pkl'))
+    return model
+
+
+def fit_predict_model(model, X_tr, y_tr, X_va, X_te, already_fitted: bool = False):
     if model is None:
         return None, None
-    model.fit(X_tr, y_tr)
+    if not already_fitted:
+        model.fit(X_tr, y_tr)
     p_va = model.predict_proba(X_va)[:, 1]
     p_te = model.predict_proba(X_te)[:, 1]
     return p_va, p_te
@@ -282,15 +404,16 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
                 n_jobs=-1
             )
             if ENABLE_OPTUNA and not FAST_SMOKE_TEST:
-                xgb = _fit_xgb_optuna(X_tr, y_tr, X_va, y_va, class_ratio, seed, n_trials=40)
-                lgbm = _fit_lgbm_optuna(X_tr, y_tr, X_va, y_va, seed, n_trials=40)
+                xgb = _fit_xgb_optuna(X_tr, y_tr, X_va, y_va, class_ratio, seed, fold=fold, n_trials=40)
+                lgbm = _fit_lgbm_optuna(X_tr, y_tr, X_va, y_va, seed, fold=fold, n_trials=40)
             else:
                 xgb = get_xgb(class_ratio, seed)
                 lgbm = get_lgbm(seed)
             tabnet = get_tabnet(seed)
 
             for key, model in [('rf', rf), ('xgb', xgb), ('lgbm', lgbm), ('tabnet', tabnet)]:
-                p_va, p_te = fit_predict_model(model, X_tr, y_tr, X_va, X_test)
+                already_fitted = bool(ENABLE_OPTUNA and (key in {'xgb', 'lgbm'}) and (not FAST_SMOKE_TEST))
+                p_va, p_te = fit_predict_model(model, X_tr, y_tr, X_va, X_test, already_fitted=already_fitted)
                 if p_va is None:
                     continue
                 oof[key][va_idx] += p_va
