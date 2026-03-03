@@ -674,15 +674,21 @@ def main():
                 meta_model, meta_keys, oof_meta, test_meta = stack_meta(oof_base, y, test_base)
                 oof_ens = weighted_ensemble(oof_base, oof_meta)
                 test_ens = weighted_ensemble(test_base, test_meta)
-                if iso is not None:
+                if ENABLE_CALIBRATION:
                     try:
                         iso = IsotonicRegression(out_of_bounds='clip')
                         iso.fit(oof_ens, y.values)
                         oof_ens_cal = iso.transform(oof_ens)
                         test_ens_cal = iso.transform(test_ens)
                     except Exception:
+                        iso = None
                         oof_ens_cal = oof_ens
                         test_ens_cal = test_ens
+                else:
+                    iso = None
+                    oof_ens_cal = oof_ens
+                    test_ens_cal = test_ens
+
                 best_threshold, best_f1 = tune_threshold(y.values, oof_ens_cal)
                 final_preds = (test_ens_cal >= best_threshold).astype(int)
                 submission = pd.DataFrame({'ID': test_ids, 'CLASS': final_preds})

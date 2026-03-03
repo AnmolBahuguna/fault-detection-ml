@@ -41,6 +41,17 @@ The pipeline is designed for strong generalization on hidden evaluation data and
 
 The main entry-point is a single script: `fault_detection_solution.py`.
 
+## Key deliverables (what judges should look at)
+
+- `fault_detection_solution.py` — single-run end-to-end pipeline
+- `FINAL.csv` — submission file in required format (`ID`, `CLASS`) and correct test order
+- `run_summary.json` — automatically saved run metadata (seeds/folds/toggles/best threshold/OOF F1/runtime)
+
+If you run the full stack and enable optional modules:
+
+- `optuna_logs/` — Optuna trials + saved studies
+- `shap_importance.png` / `shap_importance.csv` — interpretability artifacts
+
 ## 1. Problem understanding
 
 Given 47 automatically generated detector features (`F01`–`F47`), the task is to predict whether the device is operating normally or in a faulty state.
@@ -68,19 +79,28 @@ This is a supervised binary classification problem.
 
 ## 3. Methodology (end-to-end pipeline)
 
-The script follows a standard tabular ML flow:
+The script follows a competitive tabular ML flow:
 
 1) load data
 2) engineer features
-3) split train/validation with stratification
-4) train baseline + ensemble models
-5) estimate probabilities and tune a classification threshold for F1-score
-6) fit the selected model on full training data
-7) generate `FINAL.csv` for `TEST.csv`
+3) multi-seed stratified K-fold OOF training (robust multi-seed averaging)
+4) base models + stacking meta-learner
+5) optional adversarial validation (shift detection)
+6) optional OOF-based blending weight optimization
+7) optional isotonic calibration
+8) threshold tuning for F1-score
+9) generate `FINAL.csv` for `TEST.csv`
 
 ## 4. Feature engineering
 
 All feature engineering is computed **row-wise**, so it can be applied consistently to both train and test without leakage.
+
+In addition to mean/std/range/skew/kurtosis and group stats, the script adds a small set of domain-style “signal summary” features:
+
+- energy proxies: `l1_energy`, `l2_energy`
+- quantiles + dispersion: `q10_all`, `q25_all`, `q75_all`, `q90_all`, `iqr_all`
+- sign structure: `frac_pos`, `frac_neg`
+- simple outlier counters: `n_outlier_gt2`, `n_outlier_gt3`
 
 ### 4.1 Global row statistics
 
@@ -117,9 +137,14 @@ The script creates multiply/divide interaction terms for a small set of raw feat
 
 ## 5. Modeling
 
-### 5.1 Baseline
+### 5.1 Base models
 
-- **Logistic Regression** is used as a sanity-check baseline (with scaling).
+The script trains an OOF backbone with the following estimators (availability depends on installed libraries):
+
+- `RandomForestClassifier` (always available)
+- `XGBClassifier` (optional)
+- `LGBMClassifier` (optional)
+- `TabNetClassifier` (optional)
 
 ### 5.2 Tree ensembles
 
@@ -131,17 +156,17 @@ The script can use the following base estimators:
 
 Class imbalance is addressed via built-in weighting strategies (for example `class_weight='balanced'` in sklearn and `scale_pos_weight` in XGBoost).
 
-### 5.3 Stacking ensemble
+### 5.2 Stacking ensemble
 
-For additional performance and robustness, a `StackingClassifier` is trained using the available base estimators, with a `LogisticRegression` meta-learner.
+For additional performance and robustness, a stacking meta-learner (`LogisticRegression`) is trained on OOF predictions from the available base estimators.
 
 If `xgboost` or `lightgbm` are not installed, the ensemble automatically adapts and trains with the remaining estimators.
 
 ## 6. Evaluation & threshold tuning
 
-### 6.1 Validation split
+### 6.1 Validation protocol
 
-A stratified train/validation split is used for quick feedback.
+The main validation signal comes from **out-of-fold (OOF)** predictions created by multi-seed stratified K-fold training.
 
 ### 6.2 F1-optimized threshold tuning
 
@@ -216,6 +241,11 @@ Additional environment variables supported by the script (see `.env.example` for
 - `XGB_WEIGHT`, `LGBM_WEIGHT`, `RF_WEIGHT`, `TABNET_WEIGHT`, `META_WEIGHT` (floats)
 
 Note: by default, the script reads these values from the process environment. If you use a `.env` file locally, load it into your shell before running.
+
+Recommended run modes:
+
+- **Judge verification**: keep `FAST_SMOKE_TEST=true` (fast end-to-end) and run once.
+- **Leaderboard / final submission**: set `FAST_SMOKE_TEST=false`, install `requirements-full.txt`, and optionally enable `ENABLE_WEIGHT_OPTIMIZATION`, `ENABLE_OPTUNA`, and `ENABLE_SHAP`.
 
 ### 8.4 Run
 
@@ -309,9 +339,10 @@ If enabled and dependencies are present:
 - `shap_importance.png`
 - `shap_importance.csv`
 
-If SHAP is enabled and dependencies are present:
+Notes:
 
-- `shap_importance.png`
+- `run_summary.json` is the easiest “judge-proof” artifact to show what configuration was used.
+- `final_model.pkl` stores meta-learner + feature drop list + calibration object (if used) + optimized blend info (if used).
 
 ## 12. Reproducibility
 
