@@ -11,6 +11,8 @@
 import pandas as pd
 import numpy as np
 import os
+import json
+import time
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -326,6 +328,13 @@ def tune_threshold(y_true: np.ndarray, prob: np.ndarray):
 
 
 def main():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=False)
+    except Exception:
+        pass
+
+    t0 = time.time()
     print("=" * 60)
     print("TOP1 PIPELINE: Loading Data")
     print("=" * 60)
@@ -334,6 +343,18 @@ def main():
     TEST_PATH = os.getenv('TEST_PATH', 'TEST.csv')
     train = pd.read_csv(TRAIN_PATH)
     test = pd.read_csv(TEST_PATH)
+
+    print("\n" + "=" * 60)
+    print("TOP1 PIPELINE: Run configuration")
+    print("=" * 60)
+    print(f"TRAIN_PATH: {TRAIN_PATH}")
+    print(f"TEST_PATH : {TEST_PATH}")
+    print(f"FAST_SMOKE_TEST: {FAST_SMOKE_TEST}")
+    print(f"SEEDS: {SEEDS}")
+    print(f"N_SPLITS: {N_SPLITS}")
+    print(f"ENABLE_ADVERSARIAL_VALIDATION: {ENABLE_ADVERSARIAL_VALIDATION}")
+    print(f"ENABLE_CALIBRATION: {ENABLE_CALIBRATION}")
+    print(f"ENABLE_PSEUDO_LABELING_TOP1: {ENABLE_PSEUDO_LABELING_TOP1}")
 
     print(f"Train shape : {train.shape}")
     print(f"Test shape  : {test.shape}")
@@ -345,12 +366,14 @@ def main():
     print(f"y distribution:\n{y.value_counts()}")
 
     drop_features = []
+    adv_auc = None
     if ENABLE_ADVERSARIAL_VALIDATION:
         print("\n" + "=" * 60)
         print("TOP1 PIPELINE: Adversarial Validation")
         print("=" * 60)
         try:
             auc, importances = adversarial_validation(X, X_test, RANDOM_STATE)
+            adv_auc = float(auc)
             print(f"Adversarial AUC (train vs test) : {auc:.4f}")
             if auc > 0.7:
                 drop_features = importances.head(10).index.tolist()
@@ -459,11 +482,45 @@ def main():
         'final_model.pkl'
     )
 
+    summary = {
+        'train_path': TRAIN_PATH,
+        'test_path': TEST_PATH,
+        'train_shape': [int(train.shape[0]), int(train.shape[1])],
+        'test_shape': [int(test.shape[0]), int(test.shape[1])],
+        'x_shape': [int(X.shape[0]), int(X.shape[1])],
+        'x_test_shape': [int(X_test.shape[0]), int(X_test.shape[1])],
+        'fast_smoke_test': bool(FAST_SMOKE_TEST),
+        'seeds': [int(s) for s in SEEDS],
+        'n_splits': int(N_SPLITS),
+        'enable_adversarial_validation': bool(ENABLE_ADVERSARIAL_VALIDATION),
+        'adversarial_auc': adv_auc,
+        'drop_features': drop_features,
+        'available_base_models': available,
+        'meta_keys': meta_keys,
+        'enable_calibration': bool(ENABLE_CALIBRATION),
+        'enable_pseudo_labeling_top1': bool(ENABLE_PSEUDO_LABELING_TOP1),
+        'pseudo_pos_th': float(PSEUDO_POS_TH),
+        'pseudo_neg_th': float(PSEUDO_NEG_TH),
+        'best_threshold': float(best_threshold),
+        'best_oof_f1': float(best_f1),
+        'weights': {
+            'xgb': float(XGB_WEIGHT),
+            'lgbm': float(LGBM_WEIGHT),
+            'rf': float(RF_WEIGHT),
+            'tabnet': float(TABNET_WEIGHT),
+            'meta': float(META_WEIGHT)
+        },
+        'runtime_seconds': float(time.time() - t0)
+    }
+    with open('run_summary.json', 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2)
+
     print("\n" + "=" * 60)
     print("TOP1 PIPELINE: Outputs")
     print("=" * 60)
     print("FINAL.csv saved")
     print("final_model.pkl saved")
+    print("run_summary.json saved")
     print(submission.head(10).to_string(index=False))
 
 

@@ -1,5 +1,32 @@
 # Machine Fault Detection (ML alrIEEEna'26)
 
+## 1-minute quickstart (judge run)
+
+1) Put `TRAIN.csv` and `TEST.csv` next to `fault_detection_solution.py`.
+
+2) Install minimal deps:
+
+```bash
+pip install -r requirements.txt
+```
+
+3) Run (fast smoke mode is default via `.env.example`):
+
+```bash
+python fault_detection_solution.py
+```
+
+4) Outputs:
+
+- `FINAL.csv` (submission)
+- `final_model.pkl` (reproducibility snapshot)
+- `run_summary.json` (run settings + OOF metrics + runtime)
+
+Runtime expectations (rough, CPU):
+
+- `FAST_SMOKE_TEST=true`: typically minutes
+- `FAST_SMOKE_TEST=false`: can take significantly longer depending on optional models and hardware
+
 ## Abstract
 
 This repository provides a research-oriented, end-to-end solution for **binary machine fault detection** using an embedded monitoring dataset with **47 numerical input features** (`F01`–`F47`).
@@ -259,6 +286,7 @@ After a successful run:
 
 - `FINAL.csv`
 - `final_model.pkl`
+- `run_summary.json`
 
 If SHAP is enabled and dependencies are present:
 

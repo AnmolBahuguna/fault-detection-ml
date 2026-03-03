@@ -12,6 +12,7 @@ venv/
 # Local artifacts
 *.pkl
 FINAL.csv
+run_summary.json
 *.png
 *.pdf
 
