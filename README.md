@@ -64,7 +64,7 @@
  - **Class 0** — Normal operation
  - **Class 1** — Fault condition
 
- This is a supervised binary classification problem evaluated using **F1-score**.
+ This is a supervised binary classification problem evaluated using **Accuracy and F1 Scores**. Rankings are strictly determined by these metrics on a hidden split.
 
  ## Dataset Specification
 
