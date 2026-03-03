@@ -7,6 +7,7 @@
 
 # ── STEP 0: INSTALL (run this once in terminal) ──────────────
 # pip install pandas numpy scikit-learn xgboost lightgbm optuna shap imbalanced-learn matplotlib seaborn
+#removed use_label_code
 
 import pandas as pd
 import numpy as np
