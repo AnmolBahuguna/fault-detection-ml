@@ -328,3 +328,10 @@
  - `FAST_SMOKE_TEST=true`
 
  for quick verification runs.
+
+ ## Created by
+
+ Created by **Team Null Syndicate**
+
+ - Member 1: **Anmol Bahuguna**
+ - Member 2: **Ayush Semwal**
