@@ -15,70 +15,65 @@ import warnings
 warnings.filterwarnings('ignore')
 
 RANDOM_STATE = 42
-N_TRIALS_XGB = 100
-N_TRIALS_LGBM = 100
+
+FAST_SMOKE_TEST = True
+
+SEEDS = [42] if FAST_SMOKE_TEST else [42, 43, 44, 45]
+N_SPLITS = 3 if FAST_SMOKE_TEST else 5
+
 ENABLE_OPTUNA = False
-ENABLE_PSEUDO_LABELING = False
+ENABLE_PSEUDO_LABELING_TOP1 = False
+ENABLE_ADVERSARIAL_VALIDATION = False if FAST_SMOKE_TEST else True
+ENABLE_CALIBRATION = True
 ENABLE_SHAP = False
+ENABLE_EDA = False
 
-# ── STEP 1: LOAD DATA ────────────────────────────────────────
-print("="*60)
-print("STEP 1: Loading Data")
-print("="*60)
+XGB_WEIGHT = 0.35
+LGBM_WEIGHT = 0.30
+RF_WEIGHT = 0.15
+TABNET_WEIGHT = 0.10
+META_WEIGHT = 0.10
 
-TRAIN_PATH = os.getenv('TRAIN_PATH', 'TRAIN.csv')
-TEST_PATH = os.getenv('TEST_PATH', 'TEST.csv')
+PSEUDO_POS_TH = 0.95
+PSEUDO_NEG_TH = 0.05
 
-train = pd.read_csv(TRAIN_PATH)
-test  = pd.read_csv(TEST_PATH)
+FEATURES = [f'F{str(i).zfill(2)}' for i in range(1, 48)]
 
-print(f"Train shape : {train.shape}")
-print(f"Test shape  : {test.shape}")
-print(f"Missing (train): {train.isnull().sum().sum()}")
-print(f"Missing (test) : {test.isnull().sum().sum()}")
-print(f"\nClass Distribution:")
-print(train['Class'].value_counts())
-print(f"Class 0 %: {train['Class'].value_counts(normalize=True)[0]*100:.1f}%")
-print(f"Class 1 %: {train['Class'].value_counts(normalize=True)[1]*100:.1f}%")
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.isotonic import IsotonicRegression
+from sklearn.base import clone
+import joblib
 
-if 'ID' not in test.columns:
-    raise KeyError("TEST.csv must contain an 'ID' column for submission.")
+from typing import Optional
 
-# ── STEP 2: FEATURE ENGINEERING ──────────────────────────────
-print("\n" + "="*60)
-print("STEP 2: Feature Engineering")
-print("="*60)
 
-FEATURES = [f'F{str(i).zfill(2)}' for i in range(1, 48)]  # F01 to F47
-
-def engineer_features(df):
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     feats = FEATURES
-
-    # --- Global Row-wise Stats (7 features) ---
-    df['mean_all']  = df[feats].mean(axis=1)
-    df['std_all']   = df[feats].std(axis=1)
-    df['max_all']   = df[feats].max(axis=1)
-    df['min_all']   = df[feats].min(axis=1)
+    df['mean_all'] = df[feats].mean(axis=1)
+    df['std_all'] = df[feats].std(axis=1)
+    df['max_all'] = df[feats].max(axis=1)
+    df['min_all'] = df[feats].min(axis=1)
     df['range_all'] = df['max_all'] - df['min_all']
-    df['skew_all']  = df[feats].skew(axis=1)
-    df['kurt_all']  = df[feats].kurtosis(axis=1)
+    df['skew_all'] = df[feats].skew(axis=1)
+    df['kurt_all'] = df[feats].kurtosis(axis=1)
 
-    # --- Group-level Stats (3 groups x 7 stats = 21 features) ---
-    groupA = [f for f in feats if int(f[1:]) <= 16]   # F01-F16
-    groupB = [f for f in feats if 17 <= int(f[1:]) <= 32]  # F17-F32
-    groupC = [f for f in feats if int(f[1:]) >= 33]   # F33-F47
+    groupA = [f for f in feats if int(f[1:]) <= 16]
+    groupB = [f for f in feats if 17 <= int(f[1:]) <= 32]
+    groupC = [f for f in feats if int(f[1:]) >= 33]
 
     for name, grp in [('A', groupA), ('B', groupB), ('C', groupC)]:
-        df[f'mean_{name}']  = df[grp].mean(axis=1)
-        df[f'std_{name}']   = df[grp].std(axis=1)
-        df[f'max_{name}']   = df[grp].max(axis=1)
-        df[f'min_{name}']   = df[grp].min(axis=1)
+        df[f'mean_{name}'] = df[grp].mean(axis=1)
+        df[f'std_{name}'] = df[grp].std(axis=1)
+        df[f'max_{name}'] = df[grp].max(axis=1)
+        df[f'min_{name}'] = df[grp].min(axis=1)
         df[f'range_{name}'] = df[f'max_{name}'] - df[f'min_{name}']
-        df[f'skew_{name}']  = df[grp].skew(axis=1)
-        df[f'kurt_{name}']  = df[grp].kurtosis(axis=1)
+        df[f'skew_{name}'] = df[grp].skew(axis=1)
+        df[f'kurt_{name}'] = df[grp].kurtosis(axis=1)
 
-    # --- Cross-Group Ratios (6 features) ---
     df['ratio_A_B'] = df['mean_A'] / (df['mean_B'] + 1e-5)
     df['ratio_B_C'] = df['mean_B'] / (df['mean_C'] + 1e-5)
     df['ratio_A_C'] = df['mean_A'] / (df['mean_C'] + 1e-5)
@@ -86,467 +81,359 @@ def engineer_features(df):
     df['std_ratio_B_C'] = df['std_B'] / (df['std_C'] + 1e-5)
     df['std_ratio_A_C'] = df['std_A'] / (df['std_C'] + 1e-5)
 
-    # --- Top Pairwise Interactions (based on domain knowledge) ---
     top_feats = ['F01', 'F10', 'F08', 'F09', 'F06', 'F07']
     for i in range(len(top_feats)):
-        for j in range(i+1, len(top_feats)):
+        for j in range(i + 1, len(top_feats)):
             f1, f2 = top_feats[i], top_feats[j]
             df[f'{f1}_x_{f2}'] = df[f1] * df[f2]
             df[f'{f1}_div_{f2}'] = df[f1] / (df[f2] + 1e-5)
 
     return df
 
-train_eng = engineer_features(train)
-test_eng  = engineer_features(test)
 
-print(f"Features before engineering : {len(FEATURES)}")
-print(f"Features after engineering  : {train_eng.shape[1] - 2}")  # minus Class and any ID
+def prepare_matrices(train: pd.DataFrame, test: pd.DataFrame):
+    if 'ID' not in test.columns:
+        raise KeyError("TEST.csv must contain an 'ID' column for submission.")
 
-train_eng = train_eng.replace([np.inf, -np.inf], np.nan)
-test_eng = test_eng.replace([np.inf, -np.inf], np.nan)
+    train_eng = engineer_features(train).replace([np.inf, -np.inf], np.nan)
+    test_eng = engineer_features(test).replace([np.inf, -np.inf], np.nan)
 
-feature_cols = [c for c in train_eng.columns if c != 'Class' and c != 'ID']
-train_medians = train_eng[feature_cols].median(numeric_only=True)
-train_eng[feature_cols] = train_eng[feature_cols].fillna(train_medians)
-test_eng[feature_cols] = test_eng[feature_cols].fillna(train_medians)
+    drop_cols = ['Class']
+    if 'ID' in train_eng.columns:
+        drop_cols.append('ID')
+    X = train_eng.drop(columns=drop_cols)
+    y = train_eng['Class'].astype(int)
 
-# ── STEP 3: PREPROCESSING ────────────────────────────────────
-print("\n" + "="*60)
-print("STEP 3: Preprocessing")
-print("="*60)
+    test_ids = test_eng['ID'].values
+    X_test = test_eng.drop(columns=['ID'])
+    X_test = X_test[X.columns]
 
-from sklearn.model_selection import StratifiedKFold, train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import f1_score, classification_report
-from sklearn.base import clone
+    med = X.median(numeric_only=True)
+    X = X.fillna(med)
+    X_test = X_test.fillna(med)
 
-# Separate features and target
-drop_cols = ['Class']
-if 'ID' in train_eng.columns:
-    drop_cols.append('ID')
-X = train_eng.drop(columns=drop_cols)
-y = train_eng['Class']
+    return X, y, X_test, test_ids
 
-# Test features (drop ID for prediction, save ID for submission)
-test_ids = test_eng['ID'].values
-X_test   = test_eng.drop(columns=['ID'])
 
-# Align columns (train and test must have same feature cols)
-X_test = X_test[X.columns]
+def adversarial_validation(X: pd.DataFrame, X_test: pd.DataFrame, random_state: int):
+    X_all = pd.concat([X, X_test], axis=0, ignore_index=True)
+    y_all = np.concatenate([np.zeros(len(X), dtype=int), np.ones(len(X_test), dtype=int)])
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
+    oof = np.zeros(len(X_all))
 
-print(f"X shape      : {X.shape}")
-print(f"X_test shape : {X_test.shape}")
-print(f"y shape      : {y.shape}")
-
-# Train-Validation split (stratified)
-X_train, X_val, y_train, y_val = train_test_split(
-    X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
-)
-print(f"\nTrain set : {X_train.shape[0]} rows")
-print(f"Val set   : {X_val.shape[0]} rows")
-
-# class imbalance ratio for scale_pos_weight
-class_ratio = (y_train == 0).sum() / (y_train == 1).sum()
-print(f"\nscale_pos_weight : {class_ratio:.3f}")
-
-# CV object for robust evaluation / threshold tuning
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
-
-# ── STEP 4: BASELINE MODEL ───────────────────────────────────
-print("\n" + "="*60)
-print("STEP 4: Baseline — Logistic Regression")
-print("="*60)
-
-from sklearn.linear_model import LogisticRegression
-
-scaler_lr = StandardScaler()
-X_train_sc = scaler_lr.fit_transform(X_train)
-X_val_sc = scaler_lr.transform(X_val)
-
-lr = LogisticRegression(max_iter=1000, class_weight='balanced', random_state=RANDOM_STATE)
-lr.fit(X_train_sc, y_train)
-lr_preds = lr.predict(X_val_sc)
-baseline_f1 = f1_score(y_val, lr_preds)
-print(f"Baseline F1 Score : {baseline_f1:.4f}")
-
-# ── STEP 5: XGBoost ──────────────────────────────────────────
-print("\n" + "="*60)
-print("STEP 5: XGBoost")
-print("="*60)
-
-try:
-    from xgboost import XGBClassifier
-
-    xgb = XGBClassifier(
-        n_estimators=500,
-        learning_rate=0.05,
-        max_depth=6,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        scale_pos_weight=class_ratio,
-        use_label_encoder=False,
-        eval_metric='logloss',
-        random_state=RANDOM_STATE,
+    model = RandomForestClassifier(
+        n_estimators=80 if FAST_SMOKE_TEST else 300,
+        max_depth=None,
+        random_state=random_state,
         n_jobs=-1
     )
-    xgb.fit(X_train, y_train)
 
-    xgb_preds = xgb.predict(X_val)
-    xgb_f1 = f1_score(y_val, xgb_preds)
-    print(f"\nXGBoost F1 Score : {xgb_f1:.4f}")
-except Exception as e:
-    xgb = None
-    xgb_f1 = np.nan
-    print(f"XGBoost skipped: {e}")
+    for tr, va in skf.split(X_all, y_all):
+        m = clone(model)
+        m.fit(X_all.iloc[tr], y_all[tr])
+        oof[va] = m.predict_proba(X_all.iloc[va])[:, 1]
 
-# ── STEP 6: LightGBM ─────────────────────────────────────────
-print("\n" + "="*60)
-print("STEP 6: LightGBM")
-print("="*60)
+    auc = roc_auc_score(y_all, oof)
+    m.fit(X_all, y_all)
+    importances = pd.Series(m.feature_importances_, index=X_all.columns).sort_values(ascending=False)
+    return float(auc), importances
 
-try:
-    from lightgbm import LGBMClassifier
 
-    lgbm = LGBMClassifier(
-        n_estimators=500,
-        learning_rate=0.05,
-        max_depth=6,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        is_unbalance=True,
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
-        verbose=-1
-    )
-    lgbm.fit(X_train, y_train)
-
-    lgbm_preds = lgbm.predict(X_val)
-    lgbm_f1 = f1_score(y_val, lgbm_preds)
-    print(f"LightGBM F1 Score : {lgbm_f1:.4f}")
-except Exception as e:
-    lgbm = None
-    lgbm_f1 = np.nan
-    print(f"LightGBM skipped: {e}")
-
-# ── STEP 7: Random Forest ────────────────────────────────────
-print("\n" + "="*60)
-print("STEP 7: Random Forest")
-print("="*60)
-
-from sklearn.ensemble import RandomForestClassifier
-
-rf = RandomForestClassifier(
-    n_estimators=500,
-    max_depth=None,
-    class_weight='balanced',
-    random_state=RANDOM_STATE,
-    n_jobs=-1
-)
-rf.fit(X_train, y_train)
-rf_preds = rf.predict(X_val)
-rf_f1 = f1_score(y_val, rf_preds)
-print(f"Random Forest F1 Score : {rf_f1:.4f}")
-
-# ── STEP 8: OPTUNA HYPERPARAMETER TUNING ─────────────────────
-print("\n" + "="*60)
-print("STEP 8: Optuna Tuning (XGBoost)")
-print("="*60)
-
-if ENABLE_OPTUNA:
-    import optuna
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-def xgb_objective(trial):
-    params = {
-        'n_estimators'    : trial.suggest_int('n_estimators', 300, 1000),
-        'max_depth'       : trial.suggest_int('max_depth', 3, 10),
-        'learning_rate'   : trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'subsample'       : trial.suggest_float('subsample', 0.6, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-        'reg_alpha'       : trial.suggest_float('reg_alpha', 1e-5, 1.0, log=True),
-        'reg_lambda'      : trial.suggest_float('reg_lambda', 1e-5, 1.0, log=True),
-        'scale_pos_weight': class_ratio,
-        'use_label_encoder': False,
-        'eval_metric'     : 'logloss',
-        'random_state'    : RANDOM_STATE,
-        'n_jobs'          : -1
-    }
-    oof_probs = np.zeros(len(X))
-    for tr_idx, te_idx in skf.split(X, y):
-        X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
-        y_tr = y.iloc[tr_idx]
-        fold_model = XGBClassifier(**params)
-        fold_model.fit(X_tr, y_tr, verbose=False)
-        oof_probs[te_idx] = fold_model.predict_proba(X_te)[:, 1]
-    preds = (oof_probs >= 0.5).astype(int)
-    return f1_score(y, preds)
-
-if ENABLE_OPTUNA:
-    study_xgb = optuna.create_study(direction='maximize')
-    study_xgb.optimize(xgb_objective, n_trials=N_TRIALS_XGB, show_progress_bar=True)
-    print(f"\nBest XGBoost F1 (Optuna, CV@0.5) : {study_xgb.best_value:.4f}")
-    print(f"Best params : {study_xgb.best_params}")
-    best_xgb = XGBClassifier(
-        **study_xgb.best_params,
-        scale_pos_weight=class_ratio,
-        use_label_encoder=False,
-        eval_metric='logloss',
-        random_state=RANDOM_STATE,
-        n_jobs=-1
-    )
-    best_xgb.fit(X_train, y_train)
-else:
-    best_xgb = xgb
-
-# ── STEP 9: LGBM OPTUNA TUNING ───────────────────────────────
-print("\n" + "="*60)
-print("STEP 9: Optuna Tuning (LightGBM)")
-print("="*60)
-
-def lgbm_objective(trial):
-    params = {
-        'n_estimators'    : trial.suggest_int('n_estimators', 300, 1000),
-        'max_depth'       : trial.suggest_int('max_depth', 3, 10),
-        'learning_rate'   : trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'subsample'       : trial.suggest_float('subsample', 0.6, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-        'min_child_samples': trial.suggest_int('min_child_samples', 10, 100),
-        'reg_alpha'       : trial.suggest_float('reg_alpha', 1e-5, 1.0, log=True),
-        'reg_lambda'      : trial.suggest_float('reg_lambda', 1e-5, 1.0, log=True),
-        'is_unbalance'    : True,
-        'random_state'    : RANDOM_STATE,
-        'n_jobs'          : -1,
-        'verbose'         : -1
-    }
-    oof_probs = np.zeros(len(X))
-    for tr_idx, te_idx in skf.split(X, y):
-        X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
-        y_tr = y.iloc[tr_idx]
-        fold_model = LGBMClassifier(**params)
-        fold_model.fit(X_tr, y_tr)
-        oof_probs[te_idx] = fold_model.predict_proba(X_te)[:, 1]
-    preds = (oof_probs >= 0.5).astype(int)
-    return f1_score(y, preds)
-
-if ENABLE_OPTUNA:
-    study_lgbm = optuna.create_study(direction='maximize')
-    study_lgbm.optimize(lgbm_objective, n_trials=N_TRIALS_LGBM, show_progress_bar=True)
-    print(f"\nBest LightGBM F1 (Optuna, CV@0.5) : {study_lgbm.best_value:.4f}")
-    print(f"Best params : {study_lgbm.best_params}")
-    best_lgbm = LGBMClassifier(
-        **study_lgbm.best_params,
-        is_unbalance=True,
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
-        verbose=-1
-    )
-    best_lgbm.fit(X_train, y_train)
-else:
-    best_lgbm = lgbm
-
-# ── STEP 10: STACKING ENSEMBLE ───────────────────────────────
-print("\n" + "="*60)
-print("STEP 10: Stacking Ensemble")
-print("="*60)
-
-from sklearn.ensemble import StackingClassifier
-
-def build_estimators():
-    ests = []
-    if best_xgb is not None:
-        ests.append(('xgb', best_xgb))
-    if best_lgbm is not None:
-        ests.append(('lgbm', best_lgbm))
-    ests.append(('rf', rf))
-    return ests
-
-stacking = StackingClassifier(
-    estimators=build_estimators(),
-    final_estimator=LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-    cv=5,
-    passthrough=False,
-    n_jobs=-1
-)
-stacking.fit(X_train, y_train)
-stack_preds = stacking.predict(X_val)
-stack_f1 = f1_score(y_val, stack_preds)
-print(f"Stacking Ensemble F1 Score : {stack_f1:.4f}")
-
-# ── STEP 11: THRESHOLD TUNING ────────────────────────────────
-print("\n" + "="*60)
-print("STEP 11: Threshold Tuning")
-print("="*60)
-
-# Use best model for probability prediction
-oof_probs = np.zeros(len(X))
-for tr_idx, te_idx in skf.split(X, y):
-    X_tr, X_te = X.iloc[tr_idx], X.iloc[te_idx]
-    y_tr = y.iloc[tr_idx]
-    fold_model = StackingClassifier(
-        estimators=[
-            *([('xgb', clone(best_xgb))] if best_xgb is not None else []),
-            *([('lgbm', clone(best_lgbm))] if best_lgbm is not None else []),
-            ('rf', clone(rf))
-        ],
-        final_estimator=LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-        cv=5,
-        passthrough=False,
-        n_jobs=-1
-    )
-    fold_model.fit(X_tr, y_tr)
-    oof_probs[te_idx] = fold_model.predict_proba(X_te)[:, 1]
-
-best_threshold = 0.5
-best_f1 = 0.0
-
-thresholds = np.round(np.linspace(0.05, 0.95, 19), 2).tolist()
-for thresh in thresholds:
-    preds_thresh = (oof_probs >= thresh).astype(int)
-    f1 = f1_score(y, preds_thresh)
-    if f1 > best_f1:
-        best_f1 = f1
-        best_threshold = float(thresh)
-
-print(f"Optimal Threshold : {best_threshold:.2f}")
-print(f"Best F1 @ Threshold : {best_f1:.4f}")
-
-# ── STEP 12: PSEUDO LABELING ─────────────────────────────────
-print("\n" + "="*60)
-print("STEP 12: Pseudo Labeling")
-print("="*60)
-
-from sklearn.calibration import CalibratedClassifierCV
-
-if ENABLE_PSEUDO_LABELING:
-    calibrated_model = CalibratedClassifierCV(estimator=stacking, cv=5, method='sigmoid')
-    calibrated_model.fit(X, y)
-
-    test_probs = calibrated_model.predict_proba(X_test)[:, 1]
-
-    high_conf_mask = (test_probs > 0.90) | (test_probs < 0.10)
-    X_pseudo = X_test[high_conf_mask]
-    y_pseudo = (test_probs[high_conf_mask] >= 0.5).astype(int)
-
-    print(f"High-confidence test samples : {high_conf_mask.sum()} / {len(test_probs)}")
-
-    if high_conf_mask.sum() > 100:
-        X_expanded = pd.concat([X, X_pseudo], ignore_index=True)
-        y_expanded = pd.concat([y, pd.Series(y_pseudo)], ignore_index=True)
-
-        stacking_pl = StackingClassifier(
-            estimators=[
-                *([('xgb', best_xgb)] if best_xgb is not None else []),
-                *([('lgbm', best_lgbm)] if best_lgbm is not None else []),
-                ('rf', rf)
-            ],
-            final_estimator=LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-            cv=5, n_jobs=-1
-        )
-        stacking_pl.fit(X_expanded, y_expanded)
-        pl_val_preds = stacking_pl.predict(X_val)
-        pl_f1 = f1_score(y_val, pl_val_preds)
-        print(f"F1 after Pseudo Labeling : {pl_f1:.4f}")
-
-        final_model = stacking_pl if pl_f1 > stack_f1 else stacking
-        print(f"Using {'Pseudo Labeled' if pl_f1 > stack_f1 else 'Original Stacking'} model")
-    else:
-        final_model = stacking
-        print("Not enough high-confidence samples — using original stacking model")
-else:
-    final_model = stacking
-
-# ── STEP 13: SHAP ANALYSIS ───────────────────────────────────
-print("\n" + "="*60)
-print("STEP 13: SHAP Feature Importance")
-print("="*60)
-
-if ENABLE_SHAP:
+def get_xgb(class_ratio: float, seed: int):
     try:
-        import shap
-        import matplotlib.pyplot as plt
+        from xgboost import XGBClassifier
+        return XGBClassifier(
+            n_estimators=800,
+            learning_rate=0.03,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_weight=2,
+            reg_alpha=0.0,
+            reg_lambda=1.0,
+            scale_pos_weight=class_ratio,
+            eval_metric='logloss',
+            random_state=seed,
+            n_jobs=-1
+        )
+    except Exception:
+        return None
 
-        # Use best XGBoost for SHAP (fastest)
-        best_xgb.fit(X_train, y_train)
-        explainer = shap.TreeExplainer(best_xgb)
-        shap_values = explainer.shap_values(X_val[:500])  # sample 500 rows for speed
 
-        # Save SHAP plot
-        plt.figure(figsize=(10, 8))
-        shap.summary_plot(shap_values, X_val[:500], plot_type='bar', show=False)
-        plt.tight_layout()
-        plt.savefig('shap_importance.png', dpi=150, bbox_inches='tight')
-        plt.close()
-        print("SHAP plot saved as: shap_importance.png")
-    except Exception as e:
-        print(f"SHAP skipped: {e}")
-else:
-    print("SHAP skipped: ENABLE_SHAP=False")
+def get_lgbm(seed: int):
+    try:
+        from lightgbm import LGBMClassifier
+        return LGBMClassifier(
+            n_estimators=1200,
+            learning_rate=0.03,
+            max_depth=7,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_samples=30,
+            reg_alpha=0.0,
+            reg_lambda=0.0,
+            is_unbalance=True,
+            random_state=seed,
+            n_jobs=-1,
+            verbose=-1
+        )
+    except Exception:
+        return None
 
-# ── STEP 14: FINAL PREDICTIONS ───────────────────────────────
-print("\n" + "="*60)
-print("STEP 14: Generating Final Predictions")
-print("="*60)
 
-# Get probabilities from final model
-final_model.fit(X, y)
-final_probs = final_model.predict_proba(X_test)[:, 1]
+def get_tabnet(seed: int):
+    try:
+        from pytorch_tabnet.tab_model import TabNetClassifier
+        return TabNetClassifier(seed=seed, verbose=0)
+    except Exception:
+        return None
 
-# Apply optimal threshold
-final_preds = (final_probs >= best_threshold).astype(int)
 
-print(f"Predictions distribution:")
-print(f"  Class 0 (Normal) : {(final_preds == 0).sum()} ({(final_preds == 0).mean()*100:.1f}%)")
-print(f"  Class 1 (Faulty) : {(final_preds == 1).sum()} ({(final_preds == 1).mean()*100:.1f}%)")
+def fit_predict_model(model, X_tr, y_tr, X_va, X_te):
+    if model is None:
+        return None, None
+    model.fit(X_tr, y_tr)
+    p_va = model.predict_proba(X_va)[:, 1]
+    p_te = model.predict_proba(X_te)[:, 1]
+    return p_va, p_te
 
-# ── STEP 15: SAVE FINAL.csv ──────────────────────────────────
-print("\n" + "="*60)
-print("STEP 15: Saving FINAL.csv")
-print("="*60)
 
-submission = pd.DataFrame({
-    'ID'   : test_ids,
-    'CLASS': final_preds
-})
+def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n_splits: int):
+    class_ratio = float((y == 0).sum() / max((y == 1).sum(), 1))
+    model_keys = ['xgb', 'lgbm', 'rf', 'tabnet']
+    oof = {k: np.zeros(len(X)) for k in model_keys}
+    test = {k: np.zeros(len(X_test)) for k in model_keys}
+    counts = {k: 0 for k in model_keys}
 
-submission.to_csv('FINAL.csv', index=False)
+    for seed in seeds:
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), 1):
+            X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+            X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
 
-# Verification
-print(f"\n✅ FINAL.csv saved successfully!")
-print(f"   Rows    : {len(submission)} (expected: 10944)")
-print(f"   Columns : {submission.columns.tolist()}")
-print(f"   Sample  :")
-print(submission.head(10).to_string(index=False))
+            rf = RandomForestClassifier(
+                n_estimators=150 if FAST_SMOKE_TEST else 600,
+                max_depth=None,
+                class_weight='balanced',
+                random_state=seed,
+                n_jobs=-1
+            )
+            xgb = get_xgb(class_ratio, seed)
+            lgbm = get_lgbm(seed)
+            tabnet = get_tabnet(seed)
 
-assert len(submission) == len(test), "ERROR: Row count mismatch!"
-assert set(submission['CLASS'].unique()).issubset({0, 1}), "ERROR: Invalid class values!"
-assert list(submission['ID']) == list(test_ids), "ERROR: ID order mismatch!"
-print("\n✅ All checks passed! FINAL.csv is ready to submit.")
+            for key, model in [('rf', rf), ('xgb', xgb), ('lgbm', lgbm), ('tabnet', tabnet)]:
+                p_va, p_te = fit_predict_model(model, X_tr, y_tr, X_va, X_test)
+                if p_va is None:
+                    continue
+                oof[key][va_idx] += p_va
+                test[key] += p_te
+                counts[key] += 1
 
-# ── STEP 16: SAVE MODEL ──────────────────────────────────────
-import joblib
-joblib.dump(final_model, 'final_model.pkl')
-scaler_full = StandardScaler()
-scaler_full.fit(X)
-joblib.dump(scaler_full, 'scaler.pkl')
-print("\n✅ Model saved as: final_model.pkl")
+    for k in model_keys:
+        if counts[k] > 0:
+            oof[k] /= counts[k]
+            test[k] /= counts[k]
+        else:
+            oof[k] = None
+            test[k] = None
 
-# ── FINAL SCORE SUMMARY ──────────────────────────────────────
-print("\n" + "="*60)
-print("FINAL SCORE SUMMARY (Validation Set)")
-print("="*60)
-print(f"  Logistic Regression (Baseline) : {baseline_f1:.4f}")
-print(f"  XGBoost                        : {xgb_f1 if np.isfinite(xgb_f1) else float('nan'):.4f}")
-print(f"  LightGBM                       : {lgbm_f1 if np.isfinite(lgbm_f1) else float('nan'):.4f}")
-print(f"  Random Forest                  : {rf_f1:.4f}")
-print(f"  Stacking Ensemble              : {stack_f1:.4f}")
-print(f"  Best Threshold Applied         : {best_threshold:.2f}")
-print(f"  Final F1 (threshold tuned)     : {best_f1:.4f}")
-print("="*60)
-print("\nFiles to push on GitHub:")
-print("  ✅ fault_detection_solution.py")
-print("  ✅ FINAL.csv")
-print("  ✅ final_model.pkl")
-print("  ✅ shap_importance.png")
-print("  ✅ requirements.txt")
-print("  ✅ README.md")
+    return oof, test
+
+
+def stack_meta(oof_dict, y: pd.Series, test_dict):
+    keys = [k for k, v in oof_dict.items() if v is not None]
+    X_meta = np.vstack([oof_dict[k] for k in keys]).T
+    X_meta_test = np.vstack([test_dict[k] for k in keys]).T
+
+    meta = LogisticRegression(max_iter=2000, class_weight='balanced', random_state=RANDOM_STATE)
+    meta.fit(X_meta, y.values)
+    oof_meta = meta.predict_proba(X_meta)[:, 1]
+    test_meta = meta.predict_proba(X_meta_test)[:, 1]
+    return meta, keys, oof_meta, test_meta
+
+
+def weighted_ensemble(probs: dict, meta_prob: Optional[np.ndarray]):
+    parts = []
+    weights = []
+
+    if probs.get('xgb') is not None:
+        parts.append(probs['xgb'])
+        weights.append(XGB_WEIGHT)
+    if probs.get('lgbm') is not None:
+        parts.append(probs['lgbm'])
+        weights.append(LGBM_WEIGHT)
+    if probs.get('rf') is not None:
+        parts.append(probs['rf'])
+        weights.append(RF_WEIGHT)
+    if probs.get('tabnet') is not None:
+        parts.append(probs['tabnet'])
+        weights.append(TABNET_WEIGHT)
+    if meta_prob is not None:
+        parts.append(meta_prob)
+        weights.append(META_WEIGHT)
+
+    w = np.array(weights, dtype=float)
+    w = w / w.sum()
+    out = np.zeros_like(parts[0], dtype=float)
+    for p, ww in zip(parts, w):
+        out += ww * p
+    return out
+
+
+def tune_threshold(y_true: np.ndarray, prob: np.ndarray):
+    best_t = 0.5
+    best = -1.0
+    for t in np.linspace(0.05, 0.95, 19):
+        pred = (prob >= t).astype(int)
+        f1 = f1_score(y_true, pred)
+        if f1 > best:
+            best = f1
+            best_t = float(t)
+    return best_t, float(best)
+
+
+def main():
+    print("=" * 60)
+    print("TOP1 PIPELINE: Loading Data")
+    print("=" * 60)
+
+    TRAIN_PATH = os.getenv('TRAIN_PATH', 'TRAIN.csv')
+    TEST_PATH = os.getenv('TEST_PATH', 'TEST.csv')
+    train = pd.read_csv(TRAIN_PATH)
+    test = pd.read_csv(TEST_PATH)
+
+    print(f"Train shape : {train.shape}")
+    print(f"Test shape  : {test.shape}")
+
+    X, y, X_test, test_ids = prepare_matrices(train, test)
+
+    print(f"X shape      : {X.shape}")
+    print(f"X_test shape : {X_test.shape}")
+    print(f"y distribution:\n{y.value_counts()}")
+
+    drop_features = []
+    if ENABLE_ADVERSARIAL_VALIDATION:
+        print("\n" + "=" * 60)
+        print("TOP1 PIPELINE: Adversarial Validation")
+        print("=" * 60)
+        try:
+            auc, importances = adversarial_validation(X, X_test, RANDOM_STATE)
+            print(f"Adversarial AUC (train vs test) : {auc:.4f}")
+            if auc > 0.7:
+                drop_features = importances.head(10).index.tolist()
+                print(f"Dropping shift-sensitive features (top 10): {drop_features}")
+            else:
+                print("No strong shift detected; keeping all features")
+        except Exception as e:
+            print(f"Adversarial validation skipped: {e}")
+
+    if drop_features:
+        X = X.drop(columns=drop_features)
+        X_test = X_test.drop(columns=drop_features)
+
+    print("\n" + "=" * 60)
+    print("TOP1 PIPELINE: Multi-seed OOF backbone")
+    print("=" * 60)
+    oof_base, test_base = oof_multi_seed(X, y, X_test, SEEDS, N_SPLITS)
+
+    available = [k for k, v in oof_base.items() if v is not None]
+    print(f"Available base models: {available}")
+
+    meta_model, meta_keys, oof_meta, test_meta = stack_meta(oof_base, y, test_base)
+    print(f"Meta-learner trained on: {meta_keys}")
+
+    oof_ens = weighted_ensemble(oof_base, oof_meta)
+    test_ens = weighted_ensemble(test_base, test_meta)
+
+    if ENABLE_CALIBRATION:
+        print("\n" + "=" * 60)
+        print("TOP1 PIPELINE: Isotonic Calibration")
+        print("=" * 60)
+        try:
+            iso = IsotonicRegression(out_of_bounds='clip')
+            iso.fit(oof_ens, y.values)
+            oof_ens_cal = iso.transform(oof_ens)
+            test_ens_cal = iso.transform(test_ens)
+        except Exception as e:
+            print(f"Calibration skipped: {e}")
+            oof_ens_cal = oof_ens
+            test_ens_cal = test_ens
+            iso = None
+    else:
+        oof_ens_cal = oof_ens
+        test_ens_cal = test_ens
+        iso = None
+
+    best_threshold, best_f1 = tune_threshold(y.values, oof_ens_cal)
+    print("\n" + "=" * 60)
+    print("TOP1 PIPELINE: Threshold selection")
+    print("=" * 60)
+    print(f"Best threshold : {best_threshold:.2f}")
+    print(f"Best OOF F1    : {best_f1:.4f}")
+
+    if ENABLE_PSEUDO_LABELING_TOP1:
+        print("\n" + "=" * 60)
+        print("TOP1 PIPELINE: Pseudo Labeling (1 iteration)")
+        print("=" * 60)
+        pseudo_mask = (test_ens_cal >= PSEUDO_POS_TH) | (test_ens_cal <= PSEUDO_NEG_TH)
+        if pseudo_mask.sum() > 0:
+            X_pseudo = X_test.loc[pseudo_mask]
+            y_pseudo = (test_ens_cal[pseudo_mask] >= 0.5).astype(int)
+            X_aug = pd.concat([X, X_pseudo], axis=0, ignore_index=True)
+            y_aug = pd.concat([y, pd.Series(y_pseudo)], axis=0, ignore_index=True)
+            oof_base, test_base = oof_multi_seed(X_aug, y_aug, X_test, SEEDS, N_SPLITS)
+            meta_model, meta_keys, oof_meta, test_meta = stack_meta(oof_base, y_aug, test_base)
+            oof_ens = weighted_ensemble(oof_base, oof_meta)
+            test_ens = weighted_ensemble(test_base, test_meta)
+            if iso is not None:
+                oof_ens_cal = iso.transform(oof_ens)
+                test_ens_cal = iso.transform(test_ens)
+            else:
+                oof_ens_cal = oof_ens
+                test_ens_cal = test_ens
+            best_threshold, best_f1 = tune_threshold(y_aug.values, oof_ens_cal)
+            print(f"Pseudo labeling used samples: {int(pseudo_mask.sum())}")
+            print(f"New best threshold : {best_threshold:.2f}")
+            print(f"New best OOF F1    : {best_f1:.4f}")
+        else:
+            print("No high-confidence pseudo samples found")
+
+    final_preds = (test_ens_cal >= best_threshold).astype(int)
+    submission = pd.DataFrame({'ID': test_ids, 'CLASS': final_preds})
+    submission.to_csv('FINAL.csv', index=False)
+
+    assert len(submission) == len(test), "ERROR: Row count mismatch!"
+    assert set(submission['CLASS'].unique()).issubset({0, 1}), "ERROR: Invalid class values!"
+    assert list(submission['ID']) == list(test_ids), "ERROR: ID order mismatch!"
+
+    joblib.dump(
+        {
+            'meta_model': meta_model,
+            'meta_keys': meta_keys,
+            'drop_features': drop_features,
+            'isotonic': iso,
+            'threshold': best_threshold,
+            'seeds': SEEDS,
+            'n_splits': N_SPLITS,
+            'weights': {
+                'xgb': XGB_WEIGHT,
+                'lgbm': LGBM_WEIGHT,
+                'rf': RF_WEIGHT,
+                'tabnet': TABNET_WEIGHT,
+                'meta': META_WEIGHT
+            }
+        },
+        'final_model.pkl'
+    )
+
+    print("\n" + "=" * 60)
+    print("TOP1 PIPELINE: Outputs")
+    print("=" * 60)
+    print("FINAL.csv saved")
+    print("final_model.pkl saved")
+    print(submission.head(10).to_string(index=False))
+
+
+if __name__ == '__main__':
+    main()

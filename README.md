@@ -204,11 +204,16 @@ The script asserts:
 
 ## 10. Optional components
 
-The following features exist in code but are disabled by default:
+The following switches exist in `fault_detection_solution.py` and are disabled/enabled as configured in the script:
 
-- `ENABLE_OPTUNA` (hyperparameter tuning; slower)
-- `ENABLE_PSEUDO_LABELING` (optional; can hurt if misused)
-- `ENABLE_SHAP` (explainability; requires SHAP + XGBoost)
+- `ENABLE_PSEUDO_LABELING_TOP1` (1-iteration pseudo labeling using 0.95/0.05 confidence)
+- `ENABLE_ADVERSARIAL_VALIDATION` (train vs test shift detection; drops top shift features if AUC > 0.7)
+- `ENABLE_CALIBRATION` (IsotonicRegression probability calibration)
+
+Additional hooks/flags are present for experimentation:
+
+- `ENABLE_SHAP` (requires SHAP + a tree model; not enabled by default)
+- `ENABLE_EDA` (EDA artifact generation; not enabled by default)
 
 ## 11. Generated artifacts
 
@@ -216,7 +221,6 @@ After a successful run:
 
 - `FINAL.csv`
 - `final_model.pkl`
-- `scaler.pkl`
 
 If SHAP is enabled and dependencies are present:
 

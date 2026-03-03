@@ -11,6 +11,9 @@ venv/
 
 # Local artifacts
 *.pkl
+FINAL.csv
+*.png
+*.pdf
 
 # OS / IDE
 .DS_Store
