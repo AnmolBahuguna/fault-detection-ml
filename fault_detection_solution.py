@@ -13,6 +13,7 @@ import numpy as np
 import os
 import json
 import time
+from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -53,13 +54,19 @@ SEEDS = _env_int_list("SEEDS", [42] if FAST_SMOKE_TEST else [42, 43, 44, 45])
 N_SPLITS = _env_int("N_SPLITS", 3 if FAST_SMOKE_TEST else 5)
 
 ENABLE_OPTUNA = False
+ENABLE_OPTUNA = _env_bool("ENABLE_OPTUNA", ENABLE_OPTUNA)
 ENABLE_PSEUDO_LABELING_TOP1 = _env_bool("ENABLE_PSEUDO_LABELING_TOP1", False)
 ENABLE_ADVERSARIAL_VALIDATION = _env_bool(
     "ENABLE_ADVERSARIAL_VALIDATION",
     False if FAST_SMOKE_TEST else True
 )
 ENABLE_CALIBRATION = _env_bool("ENABLE_CALIBRATION", True)
-ENABLE_SHAP = False
+ENABLE_SHAP = _env_bool("ENABLE_SHAP", False)
+ENABLE_SHAP_REFINEMENT = _env_bool("ENABLE_SHAP_REFINEMENT", False)
+SHAP_TOP_N = _env_int("SHAP_TOP_N", 40)
+ENABLE_WEIGHT_OPTIMIZATION = _env_bool("ENABLE_WEIGHT_OPTIMIZATION", True)
+WEIGHT_SEARCH_ITERS = _env_int("WEIGHT_SEARCH_ITERS", 250)
+ENABLE_CV_STABILITY_REPORT = _env_bool("ENABLE_CV_STABILITY_REPORT", True)
 ENABLE_EDA = False
 
 XGB_WEIGHT = _env_float("XGB_WEIGHT", 0.35)
@@ -114,6 +121,27 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['std_ratio_A_B'] = df['std_A'] / (df['std_B'] + 1e-5)
     df['std_ratio_B_C'] = df['std_B'] / (df['std_C'] + 1e-5)
     df['std_ratio_A_C'] = df['std_A'] / (df['std_C'] + 1e-5)
+
+    vals = df[feats].to_numpy(dtype=float)
+    abs_vals = np.abs(vals)
+    df['l1_energy'] = abs_vals.sum(axis=1)
+    df['l2_energy'] = np.sqrt((vals ** 2).sum(axis=1))
+    df['frac_pos'] = (vals > 0).mean(axis=1)
+    df['frac_neg'] = (vals < 0).mean(axis=1)
+    q10 = np.quantile(vals, 0.10, axis=1)
+    q25 = np.quantile(vals, 0.25, axis=1)
+    q75 = np.quantile(vals, 0.75, axis=1)
+    q90 = np.quantile(vals, 0.90, axis=1)
+    df['q10_all'] = q10
+    df['q25_all'] = q25
+    df['q75_all'] = q75
+    df['q90_all'] = q90
+    df['iqr_all'] = q75 - q25
+    row_mean = vals.mean(axis=1)
+    row_std = vals.std(axis=1) + 1e-8
+    z = (vals - row_mean[:, None]) / row_std[:, None]
+    df['n_outlier_gt3'] = (np.abs(z) > 3.0).sum(axis=1)
+    df['n_outlier_gt2'] = (np.abs(z) > 2.0).sum(axis=1)
 
     top_feats = ['F01', 'F10', 'F08', 'F09', 'F06', 'F07']
     for i in range(len(top_feats)):
@@ -238,6 +266,7 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
     oof = {k: np.zeros(len(X)) for k in model_keys}
     test = {k: np.zeros(len(X_test)) for k in model_keys}
     counts = {k: 0 for k in model_keys}
+    fold_scores = {k: [] for k in model_keys}
 
     for seed in seeds:
         skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
@@ -252,8 +281,12 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
                 random_state=seed,
                 n_jobs=-1
             )
-            xgb = get_xgb(class_ratio, seed)
-            lgbm = get_lgbm(seed)
+            if ENABLE_OPTUNA and not FAST_SMOKE_TEST:
+                xgb = _fit_xgb_optuna(X_tr, y_tr, X_va, y_va, class_ratio, seed, n_trials=40)
+                lgbm = _fit_lgbm_optuna(X_tr, y_tr, X_va, y_va, seed, n_trials=40)
+            else:
+                xgb = get_xgb(class_ratio, seed)
+                lgbm = get_lgbm(seed)
             tabnet = get_tabnet(seed)
 
             for key, model in [('rf', rf), ('xgb', xgb), ('lgbm', lgbm), ('tabnet', tabnet)]:
@@ -263,6 +296,9 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
                 oof[key][va_idx] += p_va
                 test[key] += p_te
                 counts[key] += 1
+                t, _ = tune_threshold(y_va.values, p_va)
+                f1 = f1_score(y_va.values, (p_va >= t).astype(int))
+                fold_scores[key].append(float(f1))
 
     for k in model_keys:
         if counts[k] > 0:
@@ -272,7 +308,20 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
             oof[k] = None
             test[k] = None
 
-    return oof, test
+    stability = {}
+    for k in model_keys:
+        scores = fold_scores.get(k, [])
+        if len(scores) == 0:
+            continue
+        stability[k] = {
+            'n_folds_total': int(len(scores)),
+            'f1_mean': float(np.mean(scores)),
+            'f1_std': float(np.std(scores)),
+            'f1_min': float(np.min(scores)),
+            'f1_max': float(np.max(scores))
+        }
+
+    return oof, test, stability
 
 
 def stack_meta(oof_dict, y: pd.Series, test_dict):
@@ -315,6 +364,79 @@ def weighted_ensemble(probs: dict, meta_prob: Optional[np.ndarray]):
     return out
 
 
+def optimize_blend_weights(oof_dict: dict, meta_oof: Optional[np.ndarray], y: pd.Series, n_iters: int):
+    keys = []
+    parts = []
+    if oof_dict.get('xgb') is not None:
+        keys.append('xgb')
+        parts.append(oof_dict['xgb'])
+    if oof_dict.get('lgbm') is not None:
+        keys.append('lgbm')
+        parts.append(oof_dict['lgbm'])
+    if oof_dict.get('rf') is not None:
+        keys.append('rf')
+        parts.append(oof_dict['rf'])
+    if oof_dict.get('tabnet') is not None:
+        keys.append('tabnet')
+        parts.append(oof_dict['tabnet'])
+    if meta_oof is not None:
+        keys.append('meta')
+        parts.append(meta_oof)
+
+    if len(parts) <= 1:
+        return None
+
+    P = np.vstack(parts).T
+    rng = np.random.RandomState(RANDOM_STATE)
+    best_w = None
+    best_f1 = -1.0
+    best_t = 0.5
+
+    for _ in range(max(int(n_iters), 1)):
+        w = rng.dirichlet(np.ones(P.shape[1]))
+        prob = P @ w
+        t, f1 = tune_threshold(y.values, prob)
+        if f1 > best_f1:
+            best_f1 = float(f1)
+            best_t = float(t)
+            best_w = w
+
+    return {
+        'keys': keys,
+        'weights': [float(x) for x in best_w],
+        'best_threshold': best_t,
+        'best_oof_f1': best_f1
+    }
+
+
+def _save_shap_importance(model, X: pd.DataFrame, out_png: str, out_csv: str):
+    try:
+        import shap
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+
+    try:
+        X_sample = X.sample(n=min(2000, len(X)), random_state=RANDOM_STATE)
+        explainer = shap.Explainer(model, X_sample)
+        shap_values = explainer(X_sample)
+        vals = np.abs(shap_values.values)
+        if vals.ndim == 3:
+            vals = vals[:, :, 1]
+        imp = pd.Series(vals.mean(axis=0), index=X_sample.columns).sort_values(ascending=False)
+        imp.to_csv(out_csv)
+        plt.figure(figsize=(10, 6))
+        imp.head(30).iloc[::-1].plot(kind='barh')
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=200)
+        plt.close()
+        return True
+    except Exception:
+        return False
+
+
 def tune_threshold(y_true: np.ndarray, prob: np.ndarray):
     best_t = 0.5
     best = -1.0
@@ -355,6 +477,11 @@ def main():
     print(f"ENABLE_ADVERSARIAL_VALIDATION: {ENABLE_ADVERSARIAL_VALIDATION}")
     print(f"ENABLE_CALIBRATION: {ENABLE_CALIBRATION}")
     print(f"ENABLE_PSEUDO_LABELING_TOP1: {ENABLE_PSEUDO_LABELING_TOP1}")
+    print(f"ENABLE_WEIGHT_OPTIMIZATION: {ENABLE_WEIGHT_OPTIMIZATION}")
+    print(f"ENABLE_CV_STABILITY_REPORT: {ENABLE_CV_STABILITY_REPORT}")
+    print(f"ENABLE_OPTUNA: {ENABLE_OPTUNA}")
+    print(f"ENABLE_SHAP: {ENABLE_SHAP}")
+    print(f"ENABLE_SHAP_REFINEMENT: {ENABLE_SHAP_REFINEMENT}")
 
     print(f"Train shape : {train.shape}")
     print(f"Test shape  : {test.shape}")
@@ -390,7 +517,7 @@ def main():
     print("\n" + "=" * 60)
     print("TOP1 PIPELINE: Multi-seed OOF backbone")
     print("=" * 60)
-    oof_base, test_base = oof_multi_seed(X, y, X_test, SEEDS, N_SPLITS)
+    oof_base, test_base, stability = oof_multi_seed(X, y, X_test, SEEDS, N_SPLITS)
 
     available = [k for k, v in oof_base.items() if v is not None]
     print(f"Available base models: {available}")
@@ -398,8 +525,38 @@ def main():
     meta_model, meta_keys, oof_meta, test_meta = stack_meta(oof_base, y, test_base)
     print(f"Meta-learner trained on: {meta_keys}")
 
+    if ENABLE_CV_STABILITY_REPORT and stability:
+        print("\n" + "=" * 60)
+        print("TOP1 PIPELINE: Cross-fold stability report")
+        print("=" * 60)
+        for k, st in stability.items():
+            print(f"{k}: folds={st['n_folds_total']} f1_mean={st['f1_mean']:.4f} f1_std={st['f1_std']:.4f} min={st['f1_min']:.4f} max={st['f1_max']:.4f}")
+
     oof_ens = weighted_ensemble(oof_base, oof_meta)
     test_ens = weighted_ensemble(test_base, test_meta)
+
+    blend_opt = None
+    if ENABLE_WEIGHT_OPTIMIZATION and not FAST_SMOKE_TEST:
+        print("\n" + "=" * 60)
+        print("TOP1 PIPELINE: Weight optimization (OOF blending)")
+        print("=" * 60)
+        try:
+            blend_opt = optimize_blend_weights(oof_base, oof_meta, y, n_iters=WEIGHT_SEARCH_ITERS)
+            if blend_opt is not None:
+                print(f"Optimized keys: {blend_opt['keys']}")
+                print(f"Optimized weights: {[round(w, 4) for w in blend_opt['weights']]}")
+                print(f"Optimized OOF best F1: {blend_opt['best_oof_f1']:.4f} @ t={blend_opt['best_threshold']:.2f}")
+                P_oof = np.vstack([
+                    (oof_base[k] if k != 'meta' else oof_meta) for k in blend_opt['keys']
+                ]).T
+                P_te = np.vstack([
+                    (test_base[k] if k != 'meta' else test_meta) for k in blend_opt['keys']
+                ]).T
+                w = np.array(blend_opt['weights'], dtype=float)
+                oof_ens = P_oof @ w
+                test_ens = P_te @ w
+        except Exception as e:
+            print(f"Weight optimization skipped: {e}")
 
     if ENABLE_CALIBRATION:
         print("\n" + "=" * 60)
@@ -437,7 +594,7 @@ def main():
             y_pseudo = (test_ens_cal[pseudo_mask] >= 0.5).astype(int)
             X_aug = pd.concat([X, X_pseudo], axis=0, ignore_index=True)
             y_aug = pd.concat([y, pd.Series(y_pseudo)], axis=0, ignore_index=True)
-            oof_base, test_base = oof_multi_seed(X_aug, y_aug, X_test, SEEDS, N_SPLITS)
+            oof_base, test_base, stability = oof_multi_seed(X_aug, y_aug, X_test, SEEDS, N_SPLITS)
             meta_model, meta_keys, oof_meta, test_meta = stack_meta(oof_base, y_aug, test_base)
             oof_ens = weighted_ensemble(oof_base, oof_meta)
             test_ens = weighted_ensemble(test_base, test_meta)
@@ -471,6 +628,8 @@ def main():
             'threshold': best_threshold,
             'seeds': SEEDS,
             'n_splits': N_SPLITS,
+            'stability': stability,
+            'blend_optimized': blend_opt,
             'weights': {
                 'xgb': XGB_WEIGHT,
                 'lgbm': LGBM_WEIGHT,
@@ -481,6 +640,56 @@ def main():
         },
         'final_model.pkl'
     )
+
+    if ENABLE_SHAP:
+        print("\n" + "=" * 60)
+        print("TOP1 PIPELINE: SHAP importance")
+        print("=" * 60)
+        shap_model = None
+        try:
+            shap_model = get_lgbm(RANDOM_STATE)
+            if shap_model is None:
+                shap_model = get_xgb(1.0, RANDOM_STATE)
+            if shap_model is None:
+                shap_model = RandomForestClassifier(n_estimators=300, class_weight='balanced', random_state=RANDOM_STATE, n_jobs=-1)
+            shap_model.fit(X, y)
+            ok = _save_shap_importance(shap_model, X, 'shap_importance.png', 'shap_importance.csv')
+            if ok:
+                print("shap_importance.png saved")
+                print("shap_importance.csv saved")
+        except Exception as e:
+            print(f"SHAP skipped: {e}")
+
+    if ENABLE_SHAP_REFINEMENT and ENABLE_SHAP:
+        try:
+            imp = pd.read_csv('shap_importance.csv', index_col=0).iloc[:, 0]
+            top = imp.head(int(SHAP_TOP_N)).index.tolist()
+            if len(top) >= 5:
+                print("\n" + "=" * 60)
+                print("TOP1 PIPELINE: SHAP-driven feature refinement")
+                print("=" * 60)
+                X_ref = X[top]
+                X_test_ref = X_test[top]
+                oof_base, test_base, stability = oof_multi_seed(X_ref, y, X_test_ref, SEEDS, N_SPLITS)
+                meta_model, meta_keys, oof_meta, test_meta = stack_meta(oof_base, y, test_base)
+                oof_ens = weighted_ensemble(oof_base, oof_meta)
+                test_ens = weighted_ensemble(test_base, test_meta)
+                if iso is not None:
+                    try:
+                        iso = IsotonicRegression(out_of_bounds='clip')
+                        iso.fit(oof_ens, y.values)
+                        oof_ens_cal = iso.transform(oof_ens)
+                        test_ens_cal = iso.transform(test_ens)
+                    except Exception:
+                        oof_ens_cal = oof_ens
+                        test_ens_cal = test_ens
+                best_threshold, best_f1 = tune_threshold(y.values, oof_ens_cal)
+                final_preds = (test_ens_cal >= best_threshold).astype(int)
+                submission = pd.DataFrame({'ID': test_ids, 'CLASS': final_preds})
+                submission.to_csv('FINAL.csv', index=False)
+                print(f"Refined run best OOF F1: {best_f1:.4f} @ t={best_threshold:.2f}")
+        except Exception as e:
+            print(f"SHAP refinement skipped: {e}")
 
     summary = {
         'train_path': TRAIN_PATH,
@@ -499,10 +708,18 @@ def main():
         'meta_keys': meta_keys,
         'enable_calibration': bool(ENABLE_CALIBRATION),
         'enable_pseudo_labeling_top1': bool(ENABLE_PSEUDO_LABELING_TOP1),
+        'enable_optuna': bool(ENABLE_OPTUNA),
+        'enable_weight_optimization': bool(ENABLE_WEIGHT_OPTIMIZATION),
+        'enable_cv_stability_report': bool(ENABLE_CV_STABILITY_REPORT),
+        'enable_shap': bool(ENABLE_SHAP),
+        'enable_shap_refinement': bool(ENABLE_SHAP_REFINEMENT),
+        'shap_top_n': int(SHAP_TOP_N),
         'pseudo_pos_th': float(PSEUDO_POS_TH),
         'pseudo_neg_th': float(PSEUDO_NEG_TH),
         'best_threshold': float(best_threshold),
         'best_oof_f1': float(best_f1),
+        'stability': stability,
+        'blend_optimized': blend_opt,
         'weights': {
             'xgb': float(XGB_WEIGHT),
             'lgbm': float(LGBM_WEIGHT),

@@ -205,6 +205,13 @@ Additional environment variables supported by the script (see `.env.example` for
 - `ENABLE_ADVERSARIAL_VALIDATION` (true/false)
 - `ENABLE_CALIBRATION` (true/false)
 - `ENABLE_PSEUDO_LABELING_TOP1` (true/false)
+- `ENABLE_WEIGHT_OPTIMIZATION` (true/false)
+- `WEIGHT_SEARCH_ITERS` (integer; random search iterations)
+- `ENABLE_CV_STABILITY_REPORT` (true/false)
+- `ENABLE_OPTUNA` (true/false; enables Optuna tuning logs if Optuna + model libs installed)
+- `ENABLE_SHAP` (true/false)
+- `ENABLE_SHAP_REFINEMENT` (true/false)
+- `SHAP_TOP_N` (integer)
 - `PSEUDO_POS_TH` / `PSEUDO_NEG_TH` (floats; used only if pseudo labeling enabled)
 - `XGB_WEIGHT`, `LGBM_WEIGHT`, `RF_WEIGHT`, `TABNET_WEIGHT`, `META_WEIGHT` (floats)
 
@@ -270,6 +277,14 @@ The following switches exist in `fault_detection_solution.py` and are disabled/e
 - `ENABLE_ADVERSARIAL_VALIDATION` (train vs test shift detection; drops top shift features if AUC > 0.7)
 - `ENABLE_CALIBRATION` (IsotonicRegression probability calibration)
 
+Additional advanced components (implemented; optional):
+
+- `ENABLE_WEIGHT_OPTIMIZATION` (OOF-based random search for blend weights)
+- `ENABLE_CV_STABILITY_REPORT` (reports mean/std F1 across folds for each base model)
+- `ENABLE_OPTUNA` (Optuna tuning for XGBoost/LightGBM; saves logs under `optuna_logs/`)
+- `ENABLE_SHAP` (saves `shap_importance.png` and `shap_importance.csv` when deps available)
+- `ENABLE_SHAP_REFINEMENT` (re-runs training using top `SHAP_TOP_N` features)
+
 The script also supports a fast-vs-full mode:
 
 - `FAST_SMOKE_TEST=true` is intended for quick verification that the pipeline runs end-to-end.
@@ -287,6 +302,12 @@ After a successful run:
 - `FINAL.csv`
 - `final_model.pkl`
 - `run_summary.json`
+
+If enabled and dependencies are present:
+
+- `optuna_logs/` (Optuna trial logs + studies)
+- `shap_importance.png`
+- `shap_importance.csv`
 
 If SHAP is enabled and dependencies are present:
 
