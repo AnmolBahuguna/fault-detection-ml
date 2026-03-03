@@ -168,11 +168,44 @@ $env:TEST_PATH="C:\path\to\TEST.csv"
 python fault_detection_solution.py
 ```
 
+Additional environment variables supported by the script (see `.env.example` for defaults):
+
+- `FAST_SMOKE_TEST` (true/false)
+  - `true`: fast sanity run (fewer seeds/folds, smaller RF, adversarial validation off by default)
+  - `false`: full run (multi-seed + full CV; slower)
+- `SEEDS` (comma-separated integers)
+- `N_SPLITS` (integer)
+- `ENABLE_ADVERSARIAL_VALIDATION` (true/false)
+- `ENABLE_CALIBRATION` (true/false)
+- `ENABLE_PSEUDO_LABELING_TOP1` (true/false)
+- `PSEUDO_POS_TH` / `PSEUDO_NEG_TH` (floats; used only if pseudo labeling enabled)
+- `XGB_WEIGHT`, `LGBM_WEIGHT`, `RF_WEIGHT`, `TABNET_WEIGHT`, `META_WEIGHT` (floats)
+
+Note: by default, the script reads these values from the process environment. If you use a `.env` file locally, load it into your shell before running.
+
 ### 8.4 Run
 
 ```bash
 python fault_detection_solution.py
 ```
+
+## Repository structure
+
+```text
+FAULT DETECTION/
+├── fault_detection_solution.py
+├── README.md
+├── readme.txt
+├── requirements.txt
+├── requirements-full.txt
+├── .env.example
+└── .gitignore
+```
+
+Notes:
+
+- `TRAIN.csv` and `TEST.csv` are local dataset files and should not be committed.
+- `FINAL.csv`, `final_model.pkl` and generated plots/reports are treated as local artifacts (see `.gitignore`).
 
 ## 9. Submission file (FINAL.csv)
 
@@ -209,6 +242,11 @@ The following switches exist in `fault_detection_solution.py` and are disabled/e
 - `ENABLE_PSEUDO_LABELING_TOP1` (1-iteration pseudo labeling using 0.95/0.05 confidence)
 - `ENABLE_ADVERSARIAL_VALIDATION` (train vs test shift detection; drops top shift features if AUC > 0.7)
 - `ENABLE_CALIBRATION` (IsotonicRegression probability calibration)
+
+The script also supports a fast-vs-full mode:
+
+- `FAST_SMOKE_TEST=true` is intended for quick verification that the pipeline runs end-to-end.
+- For best leaderboard performance, use `FAST_SMOKE_TEST=false` and install the full stack from `requirements-full.txt`.
 
 Additional hooks/flags are present for experimentation:
 

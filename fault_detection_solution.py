@@ -16,26 +16,58 @@ warnings.filterwarnings('ignore')
 
 RANDOM_STATE = 42
 
-FAST_SMOKE_TEST = True
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
-SEEDS = [42] if FAST_SMOKE_TEST else [42, 43, 44, 45]
-N_SPLITS = 3 if FAST_SMOKE_TEST else 5
+
+def _env_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        return default
+    return int(str(v).strip())
+
+
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        return default
+    return float(str(v).strip())
+
+
+def _env_int_list(name: str, default: list[int]) -> list[int]:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        return default
+    parts = [p.strip() for p in str(v).split(",") if p.strip()]
+    return [int(p) for p in parts]
+
+
+FAST_SMOKE_TEST = _env_bool("FAST_SMOKE_TEST", True)
+
+SEEDS = _env_int_list("SEEDS", [42] if FAST_SMOKE_TEST else [42, 43, 44, 45])
+N_SPLITS = _env_int("N_SPLITS", 3 if FAST_SMOKE_TEST else 5)
 
 ENABLE_OPTUNA = False
-ENABLE_PSEUDO_LABELING_TOP1 = False
-ENABLE_ADVERSARIAL_VALIDATION = False if FAST_SMOKE_TEST else True
-ENABLE_CALIBRATION = True
+ENABLE_PSEUDO_LABELING_TOP1 = _env_bool("ENABLE_PSEUDO_LABELING_TOP1", False)
+ENABLE_ADVERSARIAL_VALIDATION = _env_bool(
+    "ENABLE_ADVERSARIAL_VALIDATION",
+    False if FAST_SMOKE_TEST else True
+)
+ENABLE_CALIBRATION = _env_bool("ENABLE_CALIBRATION", True)
 ENABLE_SHAP = False
 ENABLE_EDA = False
 
-XGB_WEIGHT = 0.35
-LGBM_WEIGHT = 0.30
-RF_WEIGHT = 0.15
-TABNET_WEIGHT = 0.10
-META_WEIGHT = 0.10
+XGB_WEIGHT = _env_float("XGB_WEIGHT", 0.35)
+LGBM_WEIGHT = _env_float("LGBM_WEIGHT", 0.30)
+RF_WEIGHT = _env_float("RF_WEIGHT", 0.15)
+TABNET_WEIGHT = _env_float("TABNET_WEIGHT", 0.10)
+META_WEIGHT = _env_float("META_WEIGHT", 0.10)
 
-PSEUDO_POS_TH = 0.95
-PSEUDO_NEG_TH = 0.05
+PSEUDO_POS_TH = _env_float("PSEUDO_POS_TH", 0.95)
+PSEUDO_NEG_TH = _env_float("PSEUDO_NEG_TH", 0.05)
 
 FEATURES = [f'F{str(i).zfill(2)}' for i in range(1, 48)]
 
