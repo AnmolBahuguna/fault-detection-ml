@@ -55,13 +55,12 @@ def _env_int_list(name: str, default: list[int]) -> list[int]:
     return [int(p) for p in parts]
 
 
-FAST_SMOKE_TEST = _env_bool("FAST_SMOKE_TEST", True)
+FAST_SMOKE_TEST = _env_bool("FAST_SMOKE_TEST", False)
 
 SEEDS = _env_int_list("SEEDS", [42] if FAST_SMOKE_TEST else [42, 43, 44, 45])
 N_SPLITS = _env_int("N_SPLITS", 3 if FAST_SMOKE_TEST else 5)
 
-ENABLE_OPTUNA = False
-ENABLE_OPTUNA = _env_bool("ENABLE_OPTUNA", ENABLE_OPTUNA)
+ENABLE_OPTUNA = _env_bool("ENABLE_OPTUNA", False)
 ENABLE_PSEUDO_LABELING_TOP1 = _env_bool("ENABLE_PSEUDO_LABELING_TOP1", False)
 ENABLE_ADVERSARIAL_VALIDATION = _env_bool(
     "ENABLE_ADVERSARIAL_VALIDATION",
@@ -74,13 +73,17 @@ SHAP_TOP_N = _env_int("SHAP_TOP_N", 40)
 ENABLE_WEIGHT_OPTIMIZATION = _env_bool("ENABLE_WEIGHT_OPTIMIZATION", True)
 WEIGHT_SEARCH_ITERS = _env_int("WEIGHT_SEARCH_ITERS", 250)
 ENABLE_CV_STABILITY_REPORT = _env_bool("ENABLE_CV_STABILITY_REPORT", True)
+ENABLE_FEATURE_IMPORTANCE_FILTER = _env_bool("ENABLE_FEATURE_IMPORTANCE_FILTER", True)
+FEATURE_IMPORTANCE_TOP_N = _env_int("FEATURE_IMPORTANCE_TOP_N", 60)
+ENABLE_PLOTS = _env_bool("ENABLE_PLOTS", True)
 ENABLE_EDA = False
 
-XGB_WEIGHT = _env_float("XGB_WEIGHT", 0.35)
-LGBM_WEIGHT = _env_float("LGBM_WEIGHT", 0.30)
-RF_WEIGHT = _env_float("RF_WEIGHT", 0.15)
-TABNET_WEIGHT = _env_float("TABNET_WEIGHT", 0.10)
-META_WEIGHT = _env_float("META_WEIGHT", 0.10)
+XGB_WEIGHT = _env_float("XGB_WEIGHT", 0.28)
+LGBM_WEIGHT = _env_float("LGBM_WEIGHT", 0.25)
+CAT_WEIGHT = _env_float("CAT_WEIGHT", 0.25)
+RF_WEIGHT = _env_float("RF_WEIGHT", 0.10)
+TABNET_WEIGHT = _env_float("TABNET_WEIGHT", 0.05)
+META_WEIGHT = _env_float("META_WEIGHT", 0.07)
 
 PSEUDO_POS_TH = _env_float("PSEUDO_POS_TH", 0.95)
 PSEUDO_NEG_TH = _env_float("PSEUDO_NEG_TH", 0.05)
@@ -109,9 +112,9 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['skew_all'] = df[feats].skew(axis=1)
     df['kurt_all'] = df[feats].kurtosis(axis=1)
 
-    groupA = [f for f in feats if int(f[1:]) <= 16]
-    groupB = [f for f in feats if 17 <= int(f[1:]) <= 32]
-    groupC = [f for f in feats if int(f[1:]) >= 33]
+    groupA = feats[:16]    # F01–F16
+    groupB = feats[16:32]  # F17–F32
+    groupC = feats[32:]    # F33–F47
 
     for name, grp in [('A', groupA), ('B', groupB), ('C', groupC)]:
         df[f'mean_{name}'] = df[grp].mean(axis=1)
@@ -150,7 +153,8 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['n_outlier_gt3'] = (np.abs(z) > 3.0).sum(axis=1)
     df['n_outlier_gt2'] = (np.abs(z) > 2.0).sum(axis=1)
 
-    top_feats = ['F01', 'F10', 'F08', 'F09', 'F06', 'F07']
+    variances = df[feats].var()
+    top_feats = variances.nlargest(6).index.tolist()
     for i in range(len(top_feats)):
         for j in range(i + 1, len(top_feats)):
             f1, f2 = top_feats[i], top_feats[j]
@@ -163,6 +167,8 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 def prepare_matrices(train: pd.DataFrame, test: pd.DataFrame):
     if 'ID' not in test.columns:
         raise KeyError("TEST.csv must contain an 'ID' column for submission.")
+    if 'Class' not in train.columns:
+        raise KeyError("TRAIN.csv must contain a 'Class' column.")
 
     train_eng = engineer_features(train).replace([np.inf, -np.inf], np.nan)
     test_eng = engineer_features(test).replace([np.inf, -np.inf], np.nan)
@@ -182,6 +188,19 @@ def prepare_matrices(train: pd.DataFrame, test: pd.DataFrame):
     X_test = X_test.fillna(med)
 
     return X, y, X_test, test_ids
+
+
+def filter_features_by_importance(X, y, X_test, top_n, seed):
+    print(f"\nFeature importance filter: keeping top {top_n} of {X.shape[1]} features")
+    rf = RandomForestClassifier(
+        n_estimators=200, class_weight='balanced',
+        random_state=seed, n_jobs=-1
+    )
+    rf.fit(X, y)
+    imp      = pd.Series(rf.feature_importances_, index=X.columns).sort_values(ascending=False)
+    top_cols = imp.head(top_n).index.tolist()
+    print(f"  Dropped {X.shape[1] - len(top_cols)} low-importance features")
+    return X[top_cols], X_test[top_cols], imp
 
 
 def adversarial_validation(X: pd.DataFrame, X_test: pd.DataFrame, random_state: int):
@@ -245,6 +264,29 @@ def get_lgbm(seed: int):
             random_state=seed,
             n_jobs=-1,
             verbose=-1
+        )
+    except Exception:
+        return None
+
+
+def get_catboost(class_ratio: float, seed: int):
+    try:
+        from catboost import CatBoostClassifier
+        return CatBoostClassifier(
+            iterations=1000,
+            learning_rate=0.03,
+            depth=6,
+            l2_leaf_reg=3.0,
+            subsample=0.8,
+            colsample_bylevel=0.8,
+            min_data_in_leaf=20,
+            scale_pos_weight=class_ratio,
+            eval_metric='F1',
+            early_stopping_rounds=50,
+            random_seed=seed,
+            verbose=0,
+            thread_count=-1,
+            use_best_model=True,
         )
     except Exception:
         return None
@@ -379,11 +421,41 @@ def _fit_lgbm_optuna(
     return model
 
 
-def fit_predict_model(model, X_tr, y_tr, X_va, X_te, already_fitted: bool = False):
+def fit_predict_model(model, X_tr, y_tr, X_va, y_va, X_te, already_fitted: bool = False):
     if model is None:
         return None, None
     if not already_fitted:
-        model.fit(X_tr, y_tr)
+        model_type = type(model).__name__
+
+        if model_type == 'XGBClassifier':
+            try:
+                model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+            except Exception:
+                model.set_params(early_stopping_rounds=None)
+                model.fit(X_tr, y_tr)
+
+        elif model_type == 'LGBMClassifier':
+            try:
+                from lightgbm import early_stopping, log_evaluation
+                model.fit(
+                    X_tr, y_tr,
+                    eval_set=[(X_va, y_va)],
+                    callbacks=[early_stopping(50, verbose=False), log_evaluation(-1)]
+                )
+            except Exception:
+                model.fit(X_tr, y_tr)
+
+        elif model_type == 'CatBoostClassifier':
+            try:
+                from catboost import Pool
+                model.fit(Pool(X_tr, y_tr), eval_set=Pool(X_va, y_va), verbose=False)
+            except Exception:
+                model.set_params(early_stopping_rounds=None)
+                model.fit(X_tr, y_tr)
+
+        else:
+            model.fit(X_tr, y_tr)
+
     p_va = model.predict_proba(X_va)[:, 1]
     p_te = model.predict_proba(X_te)[:, 1]
     return p_va, p_te
@@ -391,8 +463,9 @@ def fit_predict_model(model, X_tr, y_tr, X_va, X_te, already_fitted: bool = Fals
 
 def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n_splits: int):
     class_ratio = float((y == 0).sum() / max((y == 1).sum(), 1))
-    model_keys = ['xgb', 'lgbm', 'rf', 'tabnet']
+    model_keys = ['xgb', 'lgbm', 'cat', 'rf', 'tabnet']
     oof = {k: np.zeros(len(X)) for k in model_keys}
+    oof_counts = {k: np.zeros(len(X), dtype=int) for k in model_keys}
     test = {k: np.zeros(len(X_test)) for k in model_keys}
     counts = {k: 0 for k in model_keys}
     fold_scores = {k: [] for k in model_keys}
@@ -416,14 +489,16 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
             else:
                 xgb = get_xgb(class_ratio, seed)
                 lgbm = get_lgbm(seed)
+            cat = get_catboost(class_ratio, seed)
             tabnet = get_tabnet(seed)
 
-            for key, model in [('rf', rf), ('xgb', xgb), ('lgbm', lgbm), ('tabnet', tabnet)]:
+            for key, model in [('rf', rf), ('xgb', xgb), ('lgbm', lgbm), ('cat', cat), ('tabnet', tabnet)]:
                 already_fitted = bool(ENABLE_OPTUNA and (key in {'xgb', 'lgbm'}) and (not FAST_SMOKE_TEST))
-                p_va, p_te = fit_predict_model(model, X_tr, y_tr, X_va, X_test, already_fitted=already_fitted)
+                p_va, p_te = fit_predict_model(model, X_tr, y_tr, X_va, y_va, X_test, already_fitted=already_fitted)
                 if p_va is None:
                     continue
                 oof[key][va_idx] += p_va
+                oof_counts[key][va_idx] += 1
                 test[key] += p_te
                 counts[key] += 1
                 t, _ = tune_threshold(y_va.values, p_va)
@@ -432,7 +507,8 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
 
     for k in model_keys:
         if counts[k] > 0:
-            oof[k] /= counts[k]
+            mask = oof_counts[k] > 0
+            oof[k][mask] /= oof_counts[k][mask]
             test[k] /= counts[k]
         else:
             oof[k] = None
@@ -476,6 +552,9 @@ def weighted_ensemble(probs: dict, meta_prob: Optional[np.ndarray]):
     if probs.get('lgbm') is not None:
         parts.append(probs['lgbm'])
         weights.append(LGBM_WEIGHT)
+    if probs.get('cat') is not None:
+        parts.append(probs['cat'])
+        weights.append(CAT_WEIGHT)
     if probs.get('rf') is not None:
         parts.append(probs['rf'])
         weights.append(RF_WEIGHT)
@@ -503,6 +582,9 @@ def optimize_blend_weights(oof_dict: dict, meta_oof: Optional[np.ndarray], y: pd
     if oof_dict.get('lgbm') is not None:
         keys.append('lgbm')
         parts.append(oof_dict['lgbm'])
+    if oof_dict.get('cat') is not None:
+        keys.append('cat')
+        parts.append(oof_dict['cat'])
     if oof_dict.get('rf') is not None:
         keys.append('rf')
         parts.append(oof_dict['rf'])
@@ -570,13 +652,66 @@ def _save_shap_importance(model, X: pd.DataFrame, out_png: str, out_csv: str):
 def tune_threshold(y_true: np.ndarray, prob: np.ndarray):
     best_t = 0.5
     best = -1.0
-    for t in np.linspace(0.05, 0.95, 19):
+    for t in np.linspace(0.01, 0.99, 199):
         pred = (prob >= t).astype(int)
         f1 = f1_score(y_true, pred)
         if f1 > best:
             best = f1
             best_t = float(t)
     return best_t, float(best)
+
+
+def generate_plots(y_true, oof_prob, threshold, feature_imp_series=None):
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from sklearn.metrics import ConfusionMatrixDisplay, roc_curve, classification_report, confusion_matrix
+    except Exception:
+        print("matplotlib not available, skipping plots")
+        return
+
+    oof_pred = (oof_prob >= threshold).astype(int)
+
+    # Confusion Matrix
+    cm  = confusion_matrix(y_true, oof_pred)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ConfusionMatrixDisplay(cm, display_labels=['Normal (0)', 'Fault (1)']).plot(ax=ax, colorbar=False)
+    ax.set_title(f'Confusion Matrix (threshold={threshold:.2f})')
+    plt.tight_layout()
+    plt.savefig('confusion_matrix.png', dpi=150)
+    plt.close()
+    print("confusion_matrix.png saved")
+
+    # ROC Curve
+    fpr, tpr, _ = roc_curve(y_true, oof_prob)
+    auc_val     = roc_auc_score(y_true, oof_prob)
+    fig, ax     = plt.subplots(figsize=(6, 5))
+    ax.plot(fpr, tpr, label=f'AUC = {auc_val:.4f}', color='steelblue', lw=2)
+    ax.plot([0,1],[0,1],'--', color='gray')
+    ax.set_xlabel('False Positive Rate')
+    ax.set_ylabel('True Positive Rate')
+    ax.set_title('ROC Curve (OOF)')
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig('roc_curve.png', dpi=150)
+    plt.close()
+    print("roc_curve.png saved")
+
+    # Feature Importance
+    if feature_imp_series is not None:
+        fig, ax = plt.subplots(figsize=(10, 7))
+        feature_imp_series.head(30).iloc[::-1].plot(kind='barh', ax=ax, color='steelblue')
+        ax.set_title('Top 30 Feature Importances (RF-based)')
+        ax.set_xlabel('Importance')
+        plt.tight_layout()
+        plt.savefig('feature_importance.png', dpi=150)
+        plt.close()
+        print("feature_importance.png saved")
+
+    # Classification Report
+    print("\nClassification Report (OOF):")
+    print(classification_report(y_true, oof_pred, target_names=['Normal', 'Fault']))
 
 
 def main():
@@ -643,6 +778,15 @@ def main():
     if drop_features:
         X = X.drop(columns=drop_features)
         X_test = X_test.drop(columns=drop_features)
+
+    feature_imp_series = None
+    if ENABLE_FEATURE_IMPORTANCE_FILTER:
+        print("\n" + "="*60)
+        print("TOP1 PIPELINE: Feature Importance Filtering")
+        print("="*60)
+        X, X_test, feature_imp_series = filter_features_by_importance(
+            X, y, X_test, FEATURE_IMPORTANCE_TOP_N, RANDOM_STATE
+        )
 
     print("\n" + "=" * 60)
     print("TOP1 PIPELINE: Multi-seed OOF backbone")
@@ -714,6 +858,12 @@ def main():
     print(f"Best threshold : {best_threshold:.2f}")
     print(f"Best OOF F1    : {best_f1:.4f}")
 
+    if ENABLE_PLOTS:
+        print("\n" + "=" * 60)
+        print("TOP1 PIPELINE: Generating Plots")
+        print("=" * 60)
+        generate_plots(y.values, oof_ens_cal, best_threshold, feature_imp_series)
+
     if ENABLE_PSEUDO_LABELING_TOP1:
         print("\n" + "=" * 60)
         print("TOP1 PIPELINE: Pseudo Labeling (1 iteration)")
@@ -729,9 +879,15 @@ def main():
             meta_model, meta_keys, oof_meta, test_meta = stack_meta(oof_base, y_aug, test_base)
             oof_ens = weighted_ensemble(oof_base, oof_meta)
             test_ens = weighted_ensemble(test_base, test_meta)
-            if iso is not None:
-                oof_ens_cal = iso.transform(oof_ens)
-                test_ens_cal = iso.transform(test_ens)
+            if ENABLE_CALIBRATION:
+                try:
+                    iso = IsotonicRegression(out_of_bounds='clip')
+                    iso.fit(oof_ens, y_aug.values)
+                    oof_ens_cal = iso.transform(oof_ens)
+                    test_ens_cal = iso.transform(test_ens)
+                except Exception:
+                    oof_ens_cal = oof_ens
+                    test_ens_cal = test_ens
             else:
                 oof_ens_cal = oof_ens
                 test_ens_cal = test_ens
@@ -764,6 +920,7 @@ def main():
             'weights': {
                 'xgb': XGB_WEIGHT,
                 'lgbm': LGBM_WEIGHT,
+                'cat': CAT_WEIGHT,
                 'rf': RF_WEIGHT,
                 'tabnet': TABNET_WEIGHT,
                 'meta': META_WEIGHT
@@ -851,6 +1008,9 @@ def main():
         'enable_shap': bool(ENABLE_SHAP),
         'enable_shap_refinement': bool(ENABLE_SHAP_REFINEMENT),
         'shap_top_n': int(SHAP_TOP_N),
+        'enable_feature_importance_filter': bool(ENABLE_FEATURE_IMPORTANCE_FILTER),
+        'feature_importance_top_n': int(FEATURE_IMPORTANCE_TOP_N),
+        'enable_plots': bool(ENABLE_PLOTS),
         'pseudo_pos_th': float(PSEUDO_POS_TH),
         'pseudo_neg_th': float(PSEUDO_NEG_TH),
         'best_threshold': float(best_threshold),
@@ -860,6 +1020,7 @@ def main():
         'weights': {
             'xgb': float(XGB_WEIGHT),
             'lgbm': float(LGBM_WEIGHT),
+            'cat': float(CAT_WEIGHT),
             'rf': float(RF_WEIGHT),
             'tabnet': float(TABNET_WEIGHT),
             'meta': float(META_WEIGHT)
