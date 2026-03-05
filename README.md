@@ -61,8 +61,17 @@ After execution, the following artifacts are produced:
 
 ### Runtime Expectations (CPU)
 
-- `FAST_SMOKE_TEST=true`: short verification run (minutes)
-- `FAST_SMOKE_TEST=false`: full cross-validation + ensemble training (longer runtime depending on hardware)
+**For Judges (FAST_SMOKE_TEST=true - default)**:
+- Runtime: ~2-5 minutes
+- Uses 1 seed, 3 folds, reduced RF estimators
+- Produces valid submission quickly
+
+**For Full Performance (FAST_SMOKE_TEST=false)**:
+- Runtime: ~30-60 minutes depending on hardware
+- Uses 4 seeds, 5 folds, full model capacity
+- Recommended for final leaderboard submission
+
+**Note**: FAST_SMOKE_TEST defaults to `true` for quick judge execution. Set to `false` for maximum performance.
 
  ## Problem Definition
 
@@ -169,6 +178,7 @@ Depending on installed libraries, the following estimators are used:
 - `XGBClassifier` (optional; with early stopping)
 - `LGBMClassifier` (optional; with early stopping)
 - `CatBoostClassifier` (optional; with early stopping)
+- `MLPClassifier` (optional; neural network with early stopping)
 - `TabNetClassifier` (optional)
 
 Class imbalance is handled via:
@@ -177,6 +187,7 @@ Class imbalance is handled via:
 - `scale_pos_weight` (XGBoost)
 - `is_unbalance=True` (LightGBM)
 - `scale_pos_weight` (CatBoost)
+- `class_weight='balanced'` (MLP)
 - equivalent strategies in TabNet
 
 ### Stacking Ensemble
@@ -221,7 +232,7 @@ The script supports runtime configuration via environment variables.
 
 Key flags:
 
-- `FAST_SMOKE_TEST`
+- `FAST_SMOKE_TEST` (default: true) - Quick execution for judges
 - `SEEDS`
 - `N_SPLITS`
 - `ENABLE_ADVERSARIAL_VALIDATION`
@@ -282,6 +293,7 @@ When enabled and dependencies are available:
 - Feature importance filtering (RF-based selection)
 - Automated plots (confusion matrix, ROC, feature importance)
 - CatBoost integration with early stopping
+- MLP neural network ensemble diversity
 
  ## Generated Artifacts
 

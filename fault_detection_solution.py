@@ -15,6 +15,7 @@ import json
 import time
 from pathlib import Path
 import warnings
+from typing import Optional, List
 warnings.filterwarnings('ignore')
 
 RANDOM_STATE = 42
@@ -47,7 +48,7 @@ def _env_float(name: str, default: float) -> float:
     return float(str(v).strip())
 
 
-def _env_int_list(name: str, default: list[int]) -> list[int]:
+def _env_int_list(name: str, default: List[int]) -> List[int]:
     v = os.getenv(name)
     if v is None or str(v).strip() == "":
         return default
@@ -55,7 +56,7 @@ def _env_int_list(name: str, default: list[int]) -> list[int]:
     return [int(p) for p in parts]
 
 
-FAST_SMOKE_TEST = _env_bool("FAST_SMOKE_TEST", False)
+FAST_SMOKE_TEST = _env_bool("FAST_SMOKE_TEST", True)
 
 SEEDS = _env_int_list("SEEDS", [42] if FAST_SMOKE_TEST else [42, 43, 44, 45])
 N_SPLITS = _env_int("N_SPLITS", 3 if FAST_SMOKE_TEST else 5)
@@ -77,12 +78,13 @@ ENABLE_FEATURE_IMPORTANCE_FILTER = _env_bool("ENABLE_FEATURE_IMPORTANCE_FILTER",
 FEATURE_IMPORTANCE_TOP_N = _env_int("FEATURE_IMPORTANCE_TOP_N", 60)
 ENABLE_PLOTS = _env_bool("ENABLE_PLOTS", True)
 
-XGB_WEIGHT = _env_float("XGB_WEIGHT", 0.28)
-LGBM_WEIGHT = _env_float("LGBM_WEIGHT", 0.25)
-CAT_WEIGHT = _env_float("CAT_WEIGHT", 0.25)
-RF_WEIGHT = _env_float("RF_WEIGHT", 0.10)
+XGB_WEIGHT = _env_float("XGB_WEIGHT", 0.25)
+LGBM_WEIGHT = _env_float("LGBM_WEIGHT", 0.22)
+CAT_WEIGHT = _env_float("CAT_WEIGHT", 0.22)
+RF_WEIGHT = _env_float("RF_WEIGHT", 0.08)
+MLP_WEIGHT = _env_float("MLP_WEIGHT", 0.08)
 TABNET_WEIGHT = _env_float("TABNET_WEIGHT", 0.05)
-META_WEIGHT = _env_float("META_WEIGHT", 0.07)
+META_WEIGHT = _env_float("META_WEIGHT", 0.10)
 
 PSEUDO_POS_TH = _env_float("PSEUDO_POS_TH", 0.95)
 PSEUDO_NEG_TH = _env_float("PSEUDO_NEG_TH", 0.05)
@@ -96,8 +98,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.base import clone
 import joblib
-
-from typing import Optional
 
 
 def engineer_features(df: pd.DataFrame, reference_feats=None):
@@ -300,6 +300,27 @@ def get_tabnet(seed: int):
         return None
 
 
+def get_mlp(seed: int):
+    try:
+        from sklearn.neural_network import MLPClassifier
+        return MLPClassifier(
+            hidden_layer_sizes=(256, 128, 64),
+            activation='relu',
+            solver='adam',
+            alpha=0.0001,
+            batch_size='auto',
+            learning_rate='adaptive',
+            learning_rate_init=0.001,
+            max_iter=500,
+            random_state=seed,
+            early_stopping=True,
+            n_iter_no_change=10,
+            validation_fraction=0.1
+        )
+    except Exception:
+        return None
+
+
 def _fit_xgb_optuna(
     X_tr: pd.DataFrame,
     y_tr: pd.Series,
@@ -462,8 +483,8 @@ def fit_predict_model(model, X_tr, y_tr, X_va, y_va, X_te, already_fitted: bool 
 
 
 def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n_splits: int):
-    class_ratio = float((y == 0).sum() / max((y == 1).sum(), 1))
-    model_keys = ['xgb', 'lgbm', 'cat', 'rf', 'tabnet']
+    class_ratio = float((y == 0).sum() / (y == 1).sum())
+    model_keys = ['xgb', 'lgbm', 'cat', 'rf', 'mlp', 'tabnet']
     oof = {k: np.zeros(len(X)) for k in model_keys}
     oof_counts = {k: np.zeros(len(X), dtype=int) for k in model_keys}
     test = {k: np.zeros(len(X_test)) for k in model_keys}
@@ -477,22 +498,23 @@ def oof_multi_seed(X: pd.DataFrame, y: pd.Series, X_test: pd.DataFrame, seeds, n
             X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
 
             rf = RandomForestClassifier(
-                n_estimators=150 if FAST_SMOKE_TEST else 600,
+                n_estimators=300 if FAST_SMOKE_TEST else 2000,
                 max_depth=None,
                 class_weight='balanced',
                 random_state=seed,
                 n_jobs=-1
             )
             if ENABLE_OPTUNA and not FAST_SMOKE_TEST:
-                xgb = _fit_xgb_optuna(X_tr, y_tr, X_va, y_va, class_ratio, seed, fold=fold, n_trials=40)
-                lgbm = _fit_lgbm_optuna(X_tr, y_tr, X_va, y_va, seed, fold=fold, n_trials=40)
+                xgb = _fit_xgb_optuna(X_tr, y_tr, X_va, y_va, class_ratio, seed, fold=fold, n_trials=100)
+                lgbm = _fit_lgbm_optuna(X_tr, y_tr, X_va, y_va, seed, fold=fold, n_trials=100)
             else:
                 xgb = get_xgb(class_ratio, seed)
                 lgbm = get_lgbm(seed)
             cat = get_catboost(class_ratio, seed)
             tabnet = get_tabnet(seed)
+            mlp = get_mlp(seed)
 
-            for key, model in [('rf', rf), ('xgb', xgb), ('lgbm', lgbm), ('cat', cat), ('tabnet', tabnet)]:
+            for key, model in [('rf', rf), ('xgb', xgb), ('lgbm', lgbm), ('cat', cat), ('mlp', mlp), ('tabnet', tabnet)]:
                 already_fitted = bool(ENABLE_OPTUNA and (key in {'xgb', 'lgbm'}) and (not FAST_SMOKE_TEST))
                 p_va, p_te = fit_predict_model(model, X_tr, y_tr, X_va, y_va, X_test, already_fitted=already_fitted)
                 if p_va is None:
@@ -558,6 +580,9 @@ def weighted_ensemble(probs: dict, meta_prob: Optional[np.ndarray]):
     if probs.get('rf') is not None:
         parts.append(probs['rf'])
         weights.append(RF_WEIGHT)
+    if probs.get('mlp') is not None:
+        parts.append(probs['mlp'])
+        weights.append(MLP_WEIGHT)
     if probs.get('tabnet') is not None:
         parts.append(probs['tabnet'])
         weights.append(TABNET_WEIGHT)
@@ -588,6 +613,9 @@ def optimize_blend_weights(oof_dict: dict, meta_oof: Optional[np.ndarray], y: pd
     if oof_dict.get('rf') is not None:
         keys.append('rf')
         parts.append(oof_dict['rf'])
+    if oof_dict.get('mlp') is not None:
+        keys.append('mlp')
+        parts.append(oof_dict['mlp'])
     if oof_dict.get('tabnet') is not None:
         keys.append('tabnet')
         parts.append(oof_dict['tabnet'])
@@ -872,7 +900,11 @@ def main():
         if pseudo_mask.sum() > 0:
             X_pseudo = X_test.loc[pseudo_mask]
             y_pseudo = np.where(test_ens_cal[pseudo_mask] >= PSEUDO_POS_TH, 1,
-                         np.where(test_ens_cal[pseudo_mask] <= PSEUDO_NEG_TH, 0, np.nan)).astype(int)
+                         np.where(test_ens_cal[pseudo_mask] <= PSEUDO_NEG_TH, 0, np.nan))
+            # Remove NaN values from pseudo labels
+            valid_mask = ~np.isnan(y_pseudo)
+            X_pseudo = X_pseudo[valid_mask]
+            y_pseudo = y_pseudo[valid_mask]
             X_aug = pd.concat([X, X_pseudo], axis=0, ignore_index=True)
             y_aug = pd.concat([y, pd.Series(y_pseudo)], axis=0, ignore_index=True)
             oof_base, test_base, stability = oof_multi_seed(X_aug, y_aug, X_test, SEEDS, N_SPLITS)
@@ -922,6 +954,7 @@ def main():
                 'lgbm': LGBM_WEIGHT,
                 'cat': CAT_WEIGHT,
                 'rf': RF_WEIGHT,
+                'mlp': MLP_WEIGHT,
                 'tabnet': TABNET_WEIGHT,
                 'meta': META_WEIGHT
             }
@@ -1022,6 +1055,7 @@ def main():
             'lgbm': float(LGBM_WEIGHT),
             'cat': float(CAT_WEIGHT),
             'rf': float(RF_WEIGHT),
+            'mlp': float(MLP_WEIGHT),
             'tabnet': float(TABNET_WEIGHT),
             'meta': float(META_WEIGHT)
         },
