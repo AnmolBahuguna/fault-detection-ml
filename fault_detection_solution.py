@@ -6,7 +6,7 @@
 # ============================================================
 
 # ── STEP 0: INSTALL (run this once in terminal) ──────────────
-# pip install pandas numpy scikit-learn xgboost lightgbm optuna shap imbalanced-learn matplotlib seaborn
+# pip install pandas numpy scikit-learn xgboost lightgbm catboost optuna shap imbalanced-learn matplotlib seaborn pytorch-tabnet
 
 import pandas as pd
 import numpy as np
@@ -76,7 +76,6 @@ ENABLE_CV_STABILITY_REPORT = _env_bool("ENABLE_CV_STABILITY_REPORT", True)
 ENABLE_FEATURE_IMPORTANCE_FILTER = _env_bool("ENABLE_FEATURE_IMPORTANCE_FILTER", True)
 FEATURE_IMPORTANCE_TOP_N = _env_int("FEATURE_IMPORTANCE_TOP_N", 60)
 ENABLE_PLOTS = _env_bool("ENABLE_PLOTS", True)
-ENABLE_EDA = False
 
 XGB_WEIGHT = _env_float("XGB_WEIGHT", 0.28)
 LGBM_WEIGHT = _env_float("LGBM_WEIGHT", 0.25)
@@ -241,6 +240,7 @@ def get_xgb(class_ratio: float, seed: int):
             reg_lambda=1.0,
             scale_pos_weight=class_ratio,
             eval_metric='logloss',
+            early_stopping_rounds=50,
             random_state=seed,
             n_jobs=-1
         )

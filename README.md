@@ -21,41 +21,48 @@
 
  Place the following files in the same directory as the script:
 
- - `TRAIN.csv`
- - `TEST.csv`
+- `TRAIN.csv`
+- `TEST.csv`
 
- ### 2. Install Dependencies
+### 2. Install Dependencies
 
- Minimal stack:
+**Option 1: Minimal stack (always works)**
+```bash
+pip install pandas>=2.0.0 numpy>=1.24.0 scikit-learn>=1.3.0 joblib>=1.3.0
+```
 
- ```bash
- pip install -r requirements.txt
- ```
+**Option 2: Use requirements file**
+```bash
+pip install -r requirements.txt  # Minimal core dependencies
+pip install -r requirements-full.txt  # Full research stack
+```
 
- Full research stack (recommended for final submission):
+**Option 3: Full research stack (recommended for best performance)**
+```bash
+pip install pandas>=2.0.0 numpy>=1.24.0 scikit-learn>=1.3.0 joblib>=1.3.0 \
+xgboost>=1.7.0 lightgbm>=4.0.0 catboost>=1.2.0 optuna>=3.0.0 \
+shap>=0.42.0 imbalanced-learn>=0.11.0 matplotlib>=3.7.0 seaborn>=0.12.0 \
+python-dotenv>=1.0.0 torch>=2.0.0 pytorch-tabnet>=4.1.0
+```
 
- ```bash
- pip install -r requirements-full.txt
- ```
+### 3. Execute
 
- ### 3. Execute
+```bash
+python fault_detection_solution.py
+```
 
- ```bash
- python fault_detection_solution.py
- ```
+### 4. Generated Outputs
 
- ### 4. Generated Outputs
+After execution, the following artifacts are produced:
 
- After execution, the following artifacts are produced:
+- `FINAL.csv` — submission file (`ID`, `CLASS`)
+- `final_model.pkl` — serialized model snapshot
+- `run_summary.json` — configuration, validation metrics, runtime details
 
- - `FINAL.csv` — submission file (`ID`, `CLASS`)
- - `final_model.pkl` — serialized model snapshot
- - `run_summary.json` — configuration, validation metrics, runtime details
+### Runtime Expectations (CPU)
 
- ### Runtime Expectations (CPU)
-
- - `FAST_SMOKE_TEST=true`: short verification run (minutes)
- - `FAST_SMOKE_TEST=false`: full cross-validation + ensemble training (longer runtime depending on hardware)
+- `FAST_SMOKE_TEST=true`: short verification run (minutes)
+- `FAST_SMOKE_TEST=false`: full cross-validation + ensemble training (longer runtime depending on hardware)
 
  ## Problem Definition
 
@@ -326,6 +333,18 @@ Optional:
  ```
 
  or run with available base models.
+
+### Missing CatBoost
+
+**`ModuleNotFoundError: No module named 'catboost'`**
+
+Install via:
+
+```bash
+pip install catboost
+```
+
+CatBoost unavailable hone par pipeline automatically remaining models ke saath chalta rehta hai.
 
  ### Missing ID column
 
