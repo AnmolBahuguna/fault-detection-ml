@@ -101,9 +101,9 @@ import joblib
 from typing import Optional
 
 
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+def engineer_features(df: pd.DataFrame, reference_feats=None):
     df = df.copy()
-    feats = FEATURES
+    feats = FEATURES if reference_feats is None else reference_feats
     df['mean_all'] = df[feats].mean(axis=1)
     df['std_all'] = df[feats].std(axis=1)
     df['max_all'] = df[feats].max(axis=1)
@@ -153,8 +153,8 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['n_outlier_gt3'] = (np.abs(z) > 3.0).sum(axis=1)
     df['n_outlier_gt2'] = (np.abs(z) > 2.0).sum(axis=1)
 
-    variances = df[feats].var()
-    top_feats = variances.nlargest(6).index.tolist()
+    # Use fixed top features for consistency
+    top_feats = ['F01', 'F10', 'F08', 'F09', 'F06', 'F07']
     for i in range(len(top_feats)):
         for j in range(i + 1, len(top_feats)):
             f1, f2 = top_feats[i], top_feats[j]
