@@ -150,30 +150,33 @@
 
  ### Selected Pairwise Interactions
 
- Multiplicative and ratio interactions are generated for a controlled subset of raw features to enhance nonlinear expressiveness without excessive dimensionality growth.
+Multiplicative and ratio interactions are generated for a controlled subset of raw features to enhance nonlinear expressiveness without excessive dimensionality growth.
 
- ## Modeling Strategy
+## Modeling Strategy
 
- ### Base Models
+### Base Models
 
- Depending on installed libraries, the following estimators are used:
+Depending on installed libraries, the following estimators are used:
 
- - `RandomForestClassifier` (baseline; always available)
- - `XGBClassifier` (optional)
- - `LGBMClassifier` (optional)
- - `TabNetClassifier` (optional)
+- `RandomForestClassifier` (baseline; always available)
+- `XGBClassifier` (optional; with early stopping)
+- `LGBMClassifier` (optional; with early stopping)
+- `CatBoostClassifier` (optional; with early stopping)
+- `TabNetClassifier` (optional)
 
- Class imbalance is handled via:
+Class imbalance is handled via:
 
- - `class_weight='balanced'` (scikit-learn)
- - `scale_pos_weight` (XGBoost)
- - equivalent strategies in LightGBM
+- `class_weight='balanced'` (scikit-learn)
+- `scale_pos_weight` (XGBoost)
+- `is_unbalance=True` (LightGBM)
+- `scale_pos_weight` (CatBoost)
+- equivalent strategies in TabNet
 
- ### Stacking Ensemble
+### Stacking Ensemble
 
- Out-of-fold predictions from base learners are used to train a meta-learner:
+Out-of-fold predictions from base learners are used to train a meta-learner:
 
- - `LogisticRegression`
+- `LogisticRegression`
 
  The ensemble adapts dynamically if optional libraries are not installed.
 
@@ -207,33 +210,36 @@
 
  ## Environment Configuration
 
- The script supports runtime configuration via environment variables.
+The script supports runtime configuration via environment variables.
 
- Key flags:
+Key flags:
 
- - `FAST_SMOKE_TEST`
- - `SEEDS`
- - `N_SPLITS`
- - `ENABLE_ADVERSARIAL_VALIDATION`
- - `ENABLE_CALIBRATION`
- - `ENABLE_WEIGHT_OPTIMIZATION`
- - `ENABLE_OPTUNA`
- - `ENABLE_SHAP`
- - `ENABLE_SHAP_REFINEMENT`
- - `ENABLE_PSEUDO_LABELING_TOP1`
+- `FAST_SMOKE_TEST`
+- `SEEDS`
+- `N_SPLITS`
+- `ENABLE_ADVERSARIAL_VALIDATION`
+- `ENABLE_CALIBRATION`
+- `ENABLE_WEIGHT_OPTIMIZATION`
+- `ENABLE_OPTUNA`
+- `ENABLE_SHAP`
+- `ENABLE_SHAP_REFINEMENT`
+- `ENABLE_PSEUDO_LABELING_TOP1`
+- `ENABLE_FEATURE_IMPORTANCE_FILTER`
+- `FEATURE_IMPORTANCE_TOP_N`
+- `ENABLE_PLOTS`
 
- Dataset path overrides:
+Dataset path overrides:
 
- - `TRAIN_PATH`
- - `TEST_PATH`
+- `TRAIN_PATH`
+- `TEST_PATH`
 
- Example (PowerShell):
+Example (PowerShell):
 
- ```bash
- $env:TRAIN_PATH="C:\path\TRAIN.csv"
- $env:TEST_PATH="C:\path\TEST.csv"
- python fault_detection_solution.py
- ```
+```bash
+$env:TRAIN_PATH="C:\path\TRAIN.csv"
+$env:TEST_PATH="C:\path\TEST.csv"
+python fault_detection_solution.py
+```
 
  ## Submission File Specification
 
@@ -256,38 +262,44 @@
 
  ## Optional Advanced Components
 
- When enabled and dependencies are available:
+When enabled and dependencies are available:
 
- - Adversarial validation (train–test shift detection)
- - Pseudo-labeling (high-confidence augmentation)
- - Isotonic probability calibration
- - OOF-based blend weight optimization
- - Optuna hyperparameter tuning (logs stored in `optuna_logs/`)
- - SHAP-based feature importance artifacts
- - SHAP-driven feature refinement
- - CV stability reporting
+- Adversarial validation (train–test shift detection)
+- Pseudo-labeling (high-confidence augmentation)
+- Isotonic probability calibration
+- OOF-based blend weight optimization
+- Optuna hyperparameter tuning (logs stored in `optuna_logs/`)
+- SHAP-based feature importance artifacts
+- SHAP-driven feature refinement
+- CV stability reporting
+- Feature importance filtering (RF-based selection)
+- Automated plots (confusion matrix, ROC, feature importance)
+- CatBoost integration with early stopping
 
  ## Generated Artifacts
 
  Core:
 
- - `FINAL.csv`
- - `final_model.pkl`
- - `run_summary.json`
+- `FINAL.csv`
+- `final_model.pkl`
+- `run_summary.json`
 
- Optional:
+Optional:
 
- - `optuna_logs/`
- - `shap_importance.png`
- - `shap_importance.csv`
+- `optuna_logs/`
+- `shap_importance.png`
+- `shap_importance.csv`
+- `confusion_matrix.png`
+- `roc_curve.png`
+- `feature_importance.png`
 
- `run_summary.json` serves as a reproducibility record containing:
+`run_summary.json` serves as a reproducibility record containing:
 
- - fold configuration
- - seed configuration
- - best threshold
- - OOF F1-score
- - runtime
+- fold configuration
+- seed configuration
+- best threshold
+- OOF F1-score
+- runtime
 
  ## Reproducibility
 
